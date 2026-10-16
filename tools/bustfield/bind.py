@@ -98,3 +98,21 @@ class Bind:
         if not Ps:
             return np.zeros((0, 3)), np.zeros((0, 3))
         return np.concatenate(Ps), np.concatenate(Ns)
+
+    def centroids(self, patterns=None):
+        """Triangle centroids of the selected layers: surface points that are
+        not vertices, used as a held-out set when checking a fit."""
+        out = []
+        for m in self.meshes:
+            if patterns is None or not m.groups:
+                idx = m.index if m.index is not None else np.arange(m.vertex_count)
+                tris = np.asarray(idx, dtype=np.int64).reshape(-1, 3)
+                if patterns is not None:
+                    pats = [patterns] if isinstance(patterns, str) else patterns
+                    if not any(fnmatch.fnmatchcase(m.name or "", p) for p in pats):
+                        continue
+            else:
+                tris = m.group_triangles(patterns)
+            if len(tris):
+                out.append(m.positions[tris].mean(axis=1))
+        return np.concatenate(out) if out else np.zeros((0, 3))

@@ -81,10 +81,11 @@ def random_params(seed=1, n_ops=3):
     return p
 
 
-def synthetic_body(frame, params, res=0.02, sigma=0.1):
+def synthetic_body(frame, params, res=0.02, sigma=0.1, curve=0.0):
     """Height-field chest with two Gaussian mounds at the anchors (body frame,
     S units): a stand-in skin for tests that must not depend on model files.
-    Returns bind-space (V, N, tris)."""
+    `curve` bends the chest back laterally (z -= curve * x^2) so the mounds
+    have a front-view contour. Returns bind-space (V, N, tris)."""
     S = frame["S"]
     a = params["anchor"]
     xs = np.arange(-0.6, 0.6 + 1e-9, res)
@@ -92,7 +93,7 @@ def synthetic_body(frame, params, res=0.02, sigma=0.1):
     X, Y = np.meshgrid(xs, ys, indexing="ij")
 
     def z(X, Y):
-        h = np.zeros_like(X)
+        h = -curve * X**2
         for s in (1, -1):
             h += params["depth"] * np.exp(-((X - s * a["x"]) ** 2 + (Y - a["y"]) ** 2) / (2 * sigma**2))
         return a["z"] + h
@@ -110,6 +111,42 @@ def synthetic_body(frame, params, res=0.02, sigma=0.1):
     N = Nw[:, :1] * L + Nw[:, 1:2] * U + Nw[:, 2:] * F
     nx, ny = X.shape
     idx = np.arange(nx * ny).reshape(nx, ny)
+    a0, b0, c0, d0 = idx[:-1, :-1].ravel(), idx[1:, :-1].ravel(), idx[1:, 1:].ravel(), idx[:-1, 1:].ravel()
+    tris = np.concatenate([np.stack([a0, b0, c0], -1), np.stack([a0, c0, d0], -1)])
+    return V, N, tris
+
+
+def synthetic_torso(frame, params, res=0.02, sigma=0.1, rx=0.4, rz=0.25):
+    """Elliptic-cylinder torso (half axes rx, rz; front at z = anchor.z) with
+    the two Gaussian mounds pushed out along the normal. Unlike the height
+    field it has real sides, i.e. a front-view occluding contour.
+    Returns bind-space (V, N, tris)."""
+    S = frame["S"]
+    a = params["anchor"]
+    zc = a["z"] - rz
+    th = np.arange(-2.3, 2.3 + 1e-9, res / rx)
+    ys = np.arange(a["y"] - 0.5, a["y"] + 0.5 + 1e-9, res)
+    T, Y = np.meshgrid(th, ys, indexing="ij")
+
+    def surf(T, Y):
+        x, z = rx * np.sin(T), zc + rz * np.cos(T)
+        nx, nz = np.sin(T) / rx, np.cos(T) / rz
+        nl = np.hypot(nx, nz)
+        m = sum(params["depth"] * np.exp(-((x - s * a["x"]) ** 2 + (Y - a["y"]) ** 2) / (2 * sigma**2)) for s in (1, -1))
+        return np.stack([x + m * nx / nl, Y, z + m * nz / nl], axis=-1)
+
+    Bp = surf(T, Y)
+    e = 1e-5
+    dt = (surf(T + e, Y) - surf(T - e, Y)) / (2 * e)
+    dy = (surf(T, Y + e) - surf(T, Y - e)) / (2 * e)
+    Nb = np.cross(dt, dy)  # outward: d/dtheta x d/dy
+    Nb /= np.linalg.norm(Nb, axis=-1, keepdims=True)
+    V = np.asarray(from_body(frame, Bp.reshape(-1, 3) * S))
+    Nw = Nb.reshape(-1, 3)
+    L, U, F = (np.asarray(frame[k]) for k in ("left", "up", "forward"))
+    N = Nw[:, :1] * L + Nw[:, 1:2] * U + Nw[:, 2:] * F
+    nt, ny = T.shape
+    idx = np.arange(nt * ny).reshape(nt, ny)
     a0, b0, c0, d0 = idx[:-1, :-1].ravel(), idx[1:, :-1].ravel(), idx[1:, 1:].ravel(), idx[:-1, 1:].ravel()
     tris = np.concatenate([np.stack([a0, b0, c0], -1), np.stack([a0, c0, d0], -1)])
     return V, N, tris

@@ -291,7 +291,7 @@ def regularizer(AtA, ridge, G=None, jac=0.0):
 # --- evaluation ---------------------------------------------------------------------
 
 
-def rms_stats(field, params_targets, samples, targets, kinds=(KIND_SKIN,)):
+def rms_stats(field, samples, targets, kinds=(KIND_SKIN,)):
     """Per target: RMS error / max teacher displacement on the given sample kinds."""
     m = np.isin(samples.kind, kinds)
     P = samples.P[m]
@@ -481,8 +481,8 @@ def fit_targets(
         jac = 1e-3 if jac == 0 else jac * 10
     ops = {t: dic.to_ops(coef[t], digits) for t in targets}
     fstud = BustField(frame, params)
-    stats = rms_stats(fstud, ops, samples, targets)
-    stats_all = rms_stats(fstud, ops, samples, targets, kinds=(KIND_SKIN, KIND_INTERIOR, KIND_SHELL))
+    stats = rms_stats(fstud, samples, targets)
+    stats_all = rms_stats(fstud, samples, targets, kinds=(KIND_SKIN, KIND_INTERIOR, KIND_SHELL))
     gmin, gper = gate_check(frame, params, tuple(sorted(set(gate_res) | set(repair_res))))
     gmin_gate = min(gper[r]["minDet"] for r in gate_res)
     return DistillResult(
@@ -579,11 +579,6 @@ def inflation_teacher(frame, params, rates=(0.3, 0.18, 0.5), sigma=(0.09, 0.12, 
 # --- CLI ----------------------------------------------------------------------------------
 
 
-def _skin_samples_from_bind(bind, patterns):
-    P, N = bind.select(patterns)
-    return P, N
-
-
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="python -m bustfield.distill", description=__doc__.split("\n\n")[0])
     ap.add_argument("--bind", required=True, help="bust-bind/1 export (frame, params, skin geometry)")
@@ -609,21 +604,31 @@ def main(argv=None):
     validate_schema(base)
     targets = TARGETS if a.targets == "all" else a.targets.split(",")
     field = BustField(frame, base)
-    P, N = _skin_samples_from_bind(bind, a.skin.split(","))
+    P, N = bind.select(a.skin.split(","))
 
     if a.teacher == "self":
         teacher = field_teacher(frame, base)
     elif a.teacher.startswith("params:"):
         teacher = field_teacher(frame, json.load(open(a.teacher[7:])))
     elif a.teacher == "inflate":
-        teacher = lambda t, X, _f=inflation_teacher(frame, base): _f(t, X)  # noqa: E731
+        teacher = inflation_teacher(frame, base)
     elif a.teacher.startswith("samples:"):
         teacher = None
     else:
         ap.error(f"unknown teacher {a.teacher}")
+    outside = None
     if teacher is None:
         samples = Samples.load(a.teacher[8:])
         targets = [t for t in targets if t in samples.U]
+        # Teacher motion outside the window cannot be represented (the field is
+        # exactly 0 there); drop those samples but report how much was lost.
+        m = field.weight(samples.P) > 0
+        umax = {t: float(np.linalg.norm(samples.U[t], axis=1).max()) for t in targets}
+        outside = {
+            "dropped": int((~m).sum()),
+            "max_disp_rel": {t: float(np.linalg.norm(samples.U[t][~m], axis=1).max(initial=0.0)) / max(umax[t], 1e-300) for t in targets},
+        }
+        samples = samples.subset(m)
     else:
         samples = make_samples(field, P, N, targets, teacher)
 
@@ -632,6 +637,15 @@ def main(argv=None):
         dic = prune(frame, base, samples, targets, dic, a.budget, a.ridge, verbose=a.verbose)
     res = fit_targets(frame, base, samples, targets, dic, ridge=a.ridge, gate=a.gate, verbose=a.verbose)
     rep = res.report()
+    if teacher is not None:
+        # Held-out check: triangle centroids were never fitted.
+        C = bind.centroids(a.skin.split(","))
+        C = C[field.weight(C) > 0]
+        if len(C):
+            ho = Samples(C, {t: teacher(t, C) for t in targets}, np.ones(len(C)), np.zeros(len(C), int))
+            rep["holdout_centroids"] = rms_stats(BustField(frame, res.params), ho, targets)
+    if outside is not None:
+        rep["teacher_outside_window"] = outside
     if a.verify_js:
         from .jsbridge import compare_with_js
 
@@ -653,6 +667,9 @@ def main(argv=None):
     fx = res.gate["minDet_fixed_targets_only"]
     if not res.gate["passed"] and fx is not None and fx <= a.gate:
         print(f"gate fails in slider combos that only use the targets NOT distilled here (min det {fx:.3f}); distill those too")
+    if "holdout_centroids" in rep:
+        ho = rep["holdout_centroids"]
+        print(f"held-out triangle centroids ({next(iter(ho.values()))['n']}): worst RMS {100 * max(v['rel_rms'] for v in ho.values()):.2f}%")
     if "js_roundtrip" in rep:
         r = rep["js_roundtrip"]
         print(f"field.js round trip: max |delta| diff {r['delta'] / r['S']:.2e} S, |J| diff {r['jacobian']:.2e}")
