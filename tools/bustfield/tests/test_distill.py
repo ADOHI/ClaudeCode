@@ -216,3 +216,19 @@ def test_changli_synthetic_target(changli, changli_self):
     res = D.fit_targets(changli.frame, base, samples, t, D.Dictionary.lattice())
     assert res.skin[t[0]]["rel_rms"] <= 0.03, res.skin
     assert res.gate["passed"]
+
+
+def test_samples_load_reads_teacher_format(tmp_path):
+    # tools/teacher writes one target per file under 'U' (+ 'U_body' in body/S units);
+    # 'U_body' must not be mistaken for a target named 'body'.
+    import numpy as np
+    from bustfield.distill import Samples
+
+    P = np.random.default_rng(0).normal(size=(5, 3))
+    U = np.random.default_rng(1).normal(size=(5, 3))
+    f = tmp_path / "bust_lift_up.npz"
+    np.savez(f, format="bust-teacher/1", target="bust_lift_up", P=P, U=U, U_body=U * 2,
+             w=np.ones(5), kind=np.zeros(5, np.uint8))
+    s = Samples.load(str(f))
+    assert list(s.U) == ["bust_lift_up"]
+    assert np.array_equal(s.U["bust_lift_up"], U)

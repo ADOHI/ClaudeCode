@@ -173,7 +173,12 @@ class Samples:
     @classmethod
     def load(cls, path):
         z = np.load(path)
-        U = {k[2:]: z[k] for k in z.files if k.startswith("U_")}
+        if "format" in z.files and str(z["format"]) == "bust-teacher/1":
+            # tools/teacher output: one target per file, displacement under 'U'
+            # (bind space). 'U_body' is the same data in body/S units, not a target.
+            U = {str(z["target"]): z["U"]}
+        else:
+            U = {k[2:]: z[k] for k in z.files if k.startswith("U_")}
         w = z["w"] if "w" in z.files else np.ones(len(z["P"]))
         kind = z["kind"] if "kind" in z.files else np.zeros(len(z["P"]), int)
         return cls(z["P"], U, w, kind)

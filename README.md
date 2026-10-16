@@ -3,8 +3,9 @@
 스타일라이즈드(애니풍) 성인 여성 캐릭터의 바스트 형태 모프를 **블렌드 셰이프로 굽는 방법론**을 검증하는 Three.js 프로토타입입니다.
 최종 파이프라인은 **Blender 셰이프 키 → FBX → Unity 블렌드 셰이프**이며, 여기서는 그 앞단의 알고리즘과 검증 도구를 다룹니다.
 
-> 상태: 진행 중인 프로토타입. 변형 커널은 교체 가능한 구조이며, 현재 베이스라인은 Regularized Kelvinlets(2017)입니다.
-> 최신 기법 리서치 결과에 따라 커널과 레이어 구성이 바뀔 수 있습니다.
+> 상태: 연구용 프로토타입 (비공개 테스트). **로컬에서 이어서 작업하려면 [docs/HANDOFF.md](docs/HANDOFF.md)부터 읽으세요.**
+> 구조: 최신 기법 teacher(FEM 준정적 해석, dARAP, 프로파일 곡선)가 형상을 만들고, 바인드 공간 Kelvinlet 필드(student)로 증류해 블렌드 셰이프로 굽습니다.
+> 근거는 [docs/research/decision-v2.md](docs/research/decision-v2.md), 결정 사항은 [docs/DECISIONS.md](docs/DECISIONS.md).
 
 ## 구조
 
@@ -18,8 +19,17 @@ web/
     autofit.js     높이맵 래스터화 + erosion으로 가슴 정점 자동 탐지
     runtime.js     본 없는 지글(감쇠 스프링 + squash&stretch), 팔 들기 포즈 보정
   src/viewer/      three.js 뷰어 (VRM/GLB/FBX 로드, 슬라이더, 히트맵, 검증 HUD)
+    morpho.js      형태계측 (상:하 볼륨비, 정점 각도, IMF 높이 등)
+    modal.js       정확 이산화 모달 지글
+    vskin.js       Velocity Skinning 스타일 셰이프
   test/            불변식 단위 테스트 (node --test)
-  scripts/         테스트 모델 다운로드, 헤드리스 스크린샷
+  scripts/         모델 다운로드, 바인드 내보내기, 헤드리스 스크린샷, A/B 컨택트 시트
+tools/             베이크 시점 Python 도구
+  bustfield/       필드 Python 포트(JS와 1e-9 일치), teacher -> 필드 증류, 프로파일 곡선 역피팅
+  teacher/         FEM 준정적 해석 teacher (성장, 중력, 인대, 역 rest-shape, 진동 모드)
+  morpho/          형태계측 Python 미러
+docs/              HANDOFF(인계), DECISIONS(결정), PHASE1_PLAN(작업 명세), research/(리서치)
+wip/phase1/        중단된 작업의 부분 코드 (미검증)
 ```
 
 ## 실행
