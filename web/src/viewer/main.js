@@ -497,6 +497,7 @@ window.__bust = {
   setGizmo: (on) => { state.view.gizmo = on; gizmo.visible = on; },
   setHud: (on) => { state.view.hud = on; renderHud(); },
   validate: () => runValidation(),
+  exportBind: () => model?.rig?.exportBind(),
   report: () => report,
   // deterministic stepping for screenshots
   step: (dt, n = 1) => { for (let i = 0; i < n; i++) frame(dt); },

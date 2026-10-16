@@ -1,0 +1,6 @@
+# Bake-time tools (CPU is enough for the prototype; GPU optional later).
+numpy>=2.0
+scipy>=1.13
+warp-lang==1.18.0
+newton==1.7.0
+ipctk==1.6.0

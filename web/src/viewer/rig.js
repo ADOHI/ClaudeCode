@@ -6,7 +6,7 @@ import { buildBodyFrame, createBustField } from '../core/field.js';
 import { bakeMesh, computeMask } from '../core/bake.js';
 import { autoFitAnchor } from '../core/autofit.js';
 import { fieldCheck, meshCheck, normalCheck } from '../core/validate.js';
-import { m4Point, m4Linear, m3Vec } from '../core/vec.js';
+import { m4Point, m4Linear, m3Vec, m3Inverse } from '../core/vec.js';
 import { meshBindData, boneBindPosition } from './model.js';
 
 export class BustRig {
@@ -93,6 +93,51 @@ export class BustRig {
         if (i !== undefined) e.mesh.morphTargetInfluences[i] = w;
       }
     }
+  }
+
+  // Everything a bake-time tool (Python teacher / distiller / Blender port)
+  // needs, in bind space. Typed arrays are base64 so the file stays compact.
+  // Format: bust-bind/1 (see docs/METHOD.md).
+  exportBind() {
+    const b64 = (ta) => {
+      const u8 = new Uint8Array(ta.buffer, ta.byteOffset, ta.byteLength);
+      let s = '';
+      for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+      return btoa(s);
+    };
+    const L = (e) => m4Linear(e.bindMatrix);
+    return {
+      format: 'bust-bind/1',
+      frame: this.frame,
+      params: this.params,
+      bones: Object.fromEntries(Object.entries(this.bones).map(([k, v]) => [k, v?.name ?? null])),
+      bonePositions: Object.fromEntries(Object.keys(this.bones).filter((k) => this.bones[k]).map((k) => [k, this.bindPos(k)])),
+      meshes: this.entries.map((e) => {
+        const n = e.positions.length / 3;
+        const nb = new Float32Array(n * 3);
+        if (e.normals) {
+          // normals to bind space: inverse-transpose of the linear part
+          const Linv = m3Inverse(L(e));
+          const LinvT = [Linv[0], Linv[3], Linv[6], Linv[1], Linv[4], Linv[7], Linv[2], Linv[5], Linv[8]];
+          for (let v = 0; v < n; v++) {
+            const r = m3Vec(LinvT, [e.normals[v * 3], e.normals[v * 3 + 1], e.normals[v * 3 + 2]]);
+            const l = Math.hypot(r[0], r[1], r[2]) || 1;
+            nb.set([r[0] / l, r[1] / l, r[2] / l], v * 3);
+          }
+        }
+        return {
+          name: e.mesh.name || '(mesh)',
+          vertexCount: n,
+          // positions/normals in bind space; index = triangle list (null => sequential)
+          positions: b64(e.posBind),
+          normals: e.normals ? b64(nb) : null,
+          index: e.index ? b64(Uint32Array.from(e.index)) : null,
+          mask: e.mask ? b64(e.mask) : null,
+          // local -> bind (column-major), to bring deltas back into mesh space
+          bindMatrix: e.bindMatrix,
+        };
+      }),
+    };
   }
 
   validate() {
