@@ -2,6 +2,22 @@
 
 로컬에서 이어서 작업하기 위한 현재 상태 정리.
 
+## 0. 받기
+
+저장소: https://github.com/ADOHI/ClaudeCode (이 프로젝트는 별도 브랜치에만 있고 기본 브랜치와 이력이 섞이지 않음)
+
+```bash
+git clone -b academy-city/main --single-branch https://github.com/ADOHI/ClaudeCode academy-city
+cd academy-city
+git fetch origin academy-city/wip-redesign:wip/redesign   # 진행 중 브랜치도 받기
+npm install
+```
+
+| 원격 브랜치 | 로컬 이름 |
+|---|---|
+| `academy-city/main` | `master` |
+| `academy-city/wip-redesign` | `wip/redesign` |
+
 ## 1. 브랜치 구조
 
 | 브랜치 | 상태 | 내용 |
