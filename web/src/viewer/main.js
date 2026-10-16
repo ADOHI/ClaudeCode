@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import GUI from 'lil-gui';
-import { loadModel, resolveBones, collectMeshes } from './model.js';
+import { loadModel, resolveBones, collectMeshes, entriesFromFileList, entriesFromZip } from './model.js';
 import { BustRig } from './rig.js';
 import { DEFAULT_PARAMS, cloneParams, buildBodyFrame } from '../core/field.js';
 import { BustDynamics, DEFAULT_DYNAMICS, DEFAULT_POSE, poseCorrective, combineWeights } from '../core/runtime.js';
@@ -33,10 +33,16 @@ camera.position.set(0, 1.4, 2.5);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 
-scene.add(new THREE.HemisphereLight(0xffffff, 0x445066, 1.2));
+const hemi = new THREE.HemisphereLight(0xffffff, 0x445066, 1.2);
+scene.add(hemi);
 const sun = new THREE.DirectionalLight(0xffffff, 2.2);
 sun.position.set(1.2, 2.5, 2.0);
 scene.add(sun);
+function setLighting(kind) {
+  // MMD toon shading expects roughly MMD's default light (~0.6 directional + ambient)
+  hemi.intensity = kind === 'mmd' ? 0.15 : 1.2;
+  sun.intensity = kind === 'mmd' ? 1.5 : 2.2;
+}
 const grid = new THREE.GridHelper(4, 16, 0x555b66, 0x3a3e46);
 scene.add(grid);
 
@@ -67,13 +73,14 @@ async function open(source) {
     scene.remove(model.root);
     model = null;
   }
-  const loaded = await loadModel(source);
+  const loaded = await loadModel(source, { keepMorphs: qs.get('keepMorphs') === '1' });
   scene.add(loaded.root);
   loaded.root.updateMatrixWorld(true);
   const bones = resolveBones(loaded.root, loaded.vrm);
   const meshes = collectMeshes(loaded.root);
   const rig = new BustRig({ ...loaded, meshes, bones });
   model = { ...loaded, rig, bones };
+  setLighting(loaded.mmd ? 'mmd' : 'default');
   const missing = rig.missingBones();
   if (missing.length) {
     report = { error: `필수 본을 찾지 못함: ${missing.join(', ')}` };
@@ -131,15 +138,33 @@ function runValidation() {
 function setupPosing() {
   const { vrm, bones } = model;
   const node = (k) => (vrm ? vrm.humanoid.getNormalizedBoneNode(k) : bones[k]);
+  // Body bob moves the lowest common ancestor of hips and chest: for MMD
+  // rigs 下半身 (hips) is a sibling of 上半身, so moving it alone would tear
+  // the body apart.
+  const hips = node('hips'), chest = vrm ? node('hips') : bones.chest;
+  const chain = new Set();
+  for (let o = hips; o; o = o.parent) chain.add(o);
+  let mover = chest;
+  while (mover && !chain.has(mover)) mover = mover.parent;
   model.pose = {
-    hips: node('hips'),
+    mover: mover ?? hips,
     lua: node('leftUpperArm'),
     rua: node('rightUpperArm'),
   };
+  // Rest arm elevation (90 = T-pose, ~40-50 = A-pose MMD rigs); posing is
+  // expressed as an absolute elevation so every rig ends up in the same pose.
+  const f = model.restFrame;
+  const elev = (a, b) => {
+    if (!a || !b) return 90;
+    const d = new THREE.Vector3(...worldPos(b)).sub(new THREE.Vector3(...worldPos(a))).normalize();
+    return THREE.MathUtils.radToDeg(Math.acos(THREE.MathUtils.clamp(-d.dot(new THREE.Vector3(...f.up)), -1, 1)));
+  };
   model.rest = {
-    hipsPos: model.pose.hips.position.clone(),
+    moverPos: model.pose.mover.position.clone(),
     lua: model.pose.lua.quaternion.clone(),
     rua: model.pose.rua.quaternion.clone(),
+    luaDeg: elev(bones.leftUpperArm, bones.leftLowerArm),
+    ruaDeg: elev(bones.rightUpperArm, bones.rightLowerArm),
   };
 }
 
@@ -158,11 +183,14 @@ function applyPose(t) {
     const s = 0.5 - 0.5 * Math.cos(2 * Math.PI * 0.18 * t);
     down = THREE.MathUtils.lerp(anim.armDown, -80, s);
   }
-  const a = THREE.MathUtils.degToRad(down);
-  rotateAboutWorldAxis(model.pose.lua, model.rest.lua, f.forward, -a);
-  rotateAboutWorldAxis(model.pose.rua, model.rest.rua, f.forward, a);
-  const hips = model.pose.hips;
-  hips.position.copy(model.rest.hipsPos);
+  // `down` is measured from the T-pose: target elevation = 90 - down.
+  const target = 90 - down;
+  const aL = THREE.MathUtils.degToRad(model.rest.luaDeg - target);
+  const aR = THREE.MathUtils.degToRad(model.rest.ruaDeg - target);
+  rotateAboutWorldAxis(model.pose.lua, model.rest.lua, f.forward, -aL);
+  rotateAboutWorldAxis(model.pose.rua, model.rest.rua, f.forward, aR);
+  const hips = model.pose.mover;
+  hips.position.copy(model.rest.moverPos);
   if (anim.play && anim.bob > 0) {
     // bouncy "walk" bob: |sin| gives a sharp contact each step
     const y = (Math.abs(Math.sin(Math.PI * anim.bobHz * t)) - 0.6) * anim.bob * f.S;
@@ -229,10 +257,17 @@ function setView(name) {
   const S = f.S;
   const v3 = (a) => new THREE.Vector3(...a);
   // Aim at the midpoint of the two apexes (bind space ~ world at rest).
+  // Apexes live in bind space (e.g. MMD units); map them to world through
+  // the chest bone (same transform the gizmo uses).
   const sides = model.rig?.field?.sides;
-  const target = sides
-    ? v3(sides[0].apex).add(v3(sides[1].apex)).multiplyScalar(0.5).addScaledVector(v3(f.up), 0.05 * S)
-    : v3(f.origin).addScaledVector(v3(f.up), 0.1 * S).addScaledVector(v3(f.forward), 0.25 * S);
+  let target;
+  if (sides) {
+    model.bones.chest.updateWorldMatrix(true, false);
+    const bindToWorld = model.bones.chest.matrixWorld.clone().multiply(model.chestBindInv);
+    target = v3(sides[0].apex).add(v3(sides[1].apex)).multiplyScalar(0.5).applyMatrix4(bindToWorld).addScaledVector(v3(f.up), 0.05 * S);
+  } else {
+    target = v3(f.origin).addScaledVector(v3(f.up), 0.1 * S).addScaledVector(v3(f.forward), 0.25 * S);
+  }
   const dirs = {
     front: [v3(f.forward), 2.6],
     side: [v3(f.left).negate(), 2.6],
@@ -341,7 +376,8 @@ const views = { front: () => setView('front'), side: () => setView('side'), thre
 for (const k of Object.keys(views)) fV.add(views, k);
 fV.add({ validate: runValidation }, 'validate').name('run validation');
 fV.add({ exportParams }, 'exportParams').name('export params JSON');
-fV.add({ load: () => fileInput.click() }, 'load').name('load model…');
+fV.add({ load: () => fileInput.click() }, 'load').name('load model / zip…');
+fV.add({ loadDir: () => dirInput.click() }, 'loadDir').name('load PMX folder…');
 
 function exportParams() {
   const data = {
@@ -360,17 +396,55 @@ function exportParams() {
 }
 
 // ---------------------------------------------------------------- files
-const fileInput = Object.assign(document.createElement('input'), { type: 'file', accept: '.vrm,.glb,.gltf,.fbx' });
-fileInput.onchange = () => fileInput.files[0] && open(fileInput.files[0]).catch(fail);
+const fileInput = Object.assign(document.createElement('input'), { type: 'file', multiple: true, accept: '.vrm,.glb,.gltf,.fbx,.pmx,.pmd,.zip' });
+fileInput.onchange = () => openFiles(fileInput.files).catch(fail);
+const dirInput = Object.assign(document.createElement('input'), { type: 'file', webkitdirectory: true });
+dirInput.onchange = () => openFiles(dirInput.files).catch(fail);
 const drop = document.getElementById('drop');
 addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('on'); });
 addEventListener('dragleave', () => drop.classList.remove('on'));
-addEventListener('drop', (e) => {
+addEventListener('drop', async (e) => {
   e.preventDefault();
   drop.classList.remove('on');
-  const f = e.dataTransfer.files[0];
-  if (f) open(f).catch(fail);
+  // Dropped folders: walk directory entries so PMX textures come along.
+  const items = [...(e.dataTransfer.items ?? [])].map((i) => i.webkitGetAsEntry?.()).filter(Boolean);
+  if (items.some((it) => it.isDirectory)) {
+    const files = [];
+    await Promise.all(items.map((it) => walkEntry(it, '', files)));
+    openEntries(files, items[0].name).catch(fail);
+  } else {
+    openFiles(e.dataTransfer.files).catch(fail);
+  }
 });
+
+function walkEntry(entry, prefix, out) {
+  if (entry.isFile) return new Promise((res) => entry.file((f) => { out.push({ path: prefix + f.name, blob: f }); res(); }, res));
+  const reader = entry.createReader();
+  return new Promise((res) => {
+    const all = [];
+    const next = () => reader.readEntries(async (batch) => {
+      if (!batch.length) {
+        await Promise.all(all.map((c) => walkEntry(c, `${prefix}${entry.name}/`, out)));
+        res();
+      } else { all.push(...batch); next(); }
+    }, res);
+    next();
+  });
+}
+
+async function openFiles(fileList) {
+  const files = [...fileList];
+  if (!files.length) return;
+  const zip = files.find((f) => /\.zip$/i.test(f.name));
+  if (zip) return openEntries(entriesFromZip(await zip.arrayBuffer(), qs.get('zipEncoding') ?? 'shift_jis'), zip.name);
+  if (files.length > 1 || files.some((f) => /\.(pmx|pmd)$/i.test(f.name))) return openEntries(entriesFromFileList(files), files[0].name);
+  return open(files[0]);
+}
+
+function openEntries(entries, name) {
+  return open({ entries, name });
+}
+
 function fail(err) {
   console.error(err);
   statusEl.textContent = `error: ${err.message}`;

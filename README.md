@@ -45,6 +45,20 @@ npm test              # 불변식 테스트
 UI의 `size`, `style`, `lift`, `spread` 슬라이더는 위 셰이프의 0..1 가중치로 매핑됩니다 (`sliderToWeights`).
 `style`은 두 확대 셰이프를 섞습니다. Unity에서는 `SetBlendShapeWeight`에 ×100 해서 넣습니다.
 
+## MMD(PMX) 모델
+
+PMX는 `@moeru/three-mmd`로 읽습니다 (three r172에서 공식 MMDLoader가 제거됨).
+- 텍스처가 별도 파일이므로 **폴더째 드래그&드롭**하거나, zip을 드롭하거나, `load PMX folder…` 버튼을 쓰세요.
+  (zip 파일명 인코딩 기본값은 Shift_JIS, 중국어 배포본은 `?zipEncoding=gbk`)
+- `public/models/<이름>/` 아래에 두면 `?model=/models/<이름>/<파일>.pmx`로도 열립니다.
+- PMX 표정 모프는 밀집 절대좌표로 들어와 메모리를 많이 써서 기본적으로 제거합니다 (`?keepMorphs=1`로 유지).
+- MMD 단위(약 8cm)는 0.08배로 미터에 맞춥니다.
+
+**명조(鸣潮) 공식 MMD 모델 주의사항**: 공식 배포처는 aplaybox(`https://www.aplaybox.com/u/811099367`)입니다.
+Readme 약관상 개조는 허용되지만 재배포(개조 여부 무관), 상업 사용, 소체화/R18 개조, 캐릭터 모욕, 공서양속 위반은 금지이고,
+일부 캐릭터(카멜리아, 카를로타 등)는 MMD 영상 외 사용도 금지합니다. 이 저장소에는 포함하지 않으며,
+비공개 기술 테스트에만 사용하세요. 실제 게임 빌드에는 직접 보유한 캐릭터를 써야 합니다.
+
 ## 테스트 모델 라이선스
 
 모델 파일은 저장소에 포함하지 않습니다. `npm run fetch-model`이 다음을 받습니다.

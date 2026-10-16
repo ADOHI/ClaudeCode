@@ -3,14 +3,28 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import { unzipSync } from 'three/addons/libs/fflate.module.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+import { MMDLoader } from '@moeru/three-mmd';
 
-export async function loadModel(source) {
+// MMD units are ~8 cm; scale to metres so lights/camera/grid match VRM/glTF.
+const MMD_SCALE = 0.08;
+
+/**
+ * @param {string|File|{entries: Array<{path:string, blob:Blob}>, name:string}} source
+ *   URL, single file, or a set of files (dropped folder / unzipped archive) for
+ *   formats with external textures (PMX).
+ */
+export async function loadModel(source, { keepMorphs = false } = {}) {
+  if (source?.entries) return loadMMDEntries(source, { keepMorphs });
   const name = typeof source === 'string' ? source.split('/').pop() : source.name;
   const ext = name.split('.').pop().toLowerCase();
   const url = typeof source === 'string' ? source : URL.createObjectURL(source);
   let root, vrm = null;
-  if (ext === 'fbx') {
+  if (ext === 'pmx' || ext === 'pmd') {
+    const mmd = await new MMDLoader().loadAsync(url);
+    return wrapMMD(mmd, name, keepMorphs);
+  } else if (ext === 'fbx') {
     root = await new FBXLoader().loadAsync(url);
   } else {
     const loader = new GLTFLoader();
@@ -22,6 +36,79 @@ export async function loadModel(source) {
   }
   root.updateMatrixWorld(true);
   return { root, vrm, name };
+}
+
+function wrapMMD(mmd, name, keepMorphs) {
+  const mesh = mmd.mesh;
+  if (!keepMorphs) {
+    // PMX morphs come in as dense ABSOLUTE copies (~1 MB per morph per 84k
+    // verts, x2 with normals on the GPU). They are facial and irrelevant to
+    // the bust lab, so drop them unless asked (?keepMorphs=1).
+    const g = mesh.geometry;
+    g.morphAttributes = {};
+    g.morphTargetsRelative = true;
+    mesh.morphTargetDictionary = undefined;
+    mesh.morphTargetInfluences = undefined;
+    mesh.updateMorphTargets();
+  }
+  const root = new THREE.Group();
+  root.name = name;
+  root.add(mesh);
+  root.scale.setScalar(MMD_SCALE);
+  root.updateMatrixWorld(true);
+  return { root, vrm: null, name, mmd };
+}
+
+// Folder / zip loading for PMX: map texture paths referenced inside the PMX
+// (backslashes, case-insensitive, sometimes sloppy) to blob URLs.
+const VROOT = 'mmd/';
+const normPath = (p) => {
+  let s = p;
+  try { s = decodeURI(s); } catch { /* keep raw */ }
+  const out = [];
+  for (const seg of s.replace(/\\/g, '/').split('/')) {
+    if (!seg || seg === '.') continue;
+    if (seg === '..') out.pop();
+    else out.push(seg);
+  }
+  return out.join('/').normalize('NFC').toLowerCase();
+};
+const baseName = (p) => p.slice(p.lastIndexOf('/') + 1);
+
+async function loadMMDEntries({ entries, name }, { keepMorphs }) {
+  const byPath = new Map(), byName = new Map();
+  let modelUrl = null, modelName = name;
+  for (const { path, blob } of entries) {
+    const key = normPath(path), url = URL.createObjectURL(blob);
+    byPath.set(key, url);
+    if (!byName.has(baseName(key))) byName.set(baseName(key), url);
+    if (!modelUrl && /\.(pmx|pmd)$/.test(key)) {
+      modelUrl = VROOT + key;
+      modelName = baseName(path);
+    }
+  }
+  if (!modelUrl) throw new Error('no .pmx/.pmd in the dropped files');
+  const manager = new THREE.LoadingManager();
+  manager.setURLModifier((url) => {
+    if (!url.startsWith(VROOT)) return url;
+    const key = normPath(url.slice(VROOT.length));
+    return byPath.get(key) ?? byName.get(baseName(key)) ?? url;
+  });
+  const mmd = await new MMDLoader(manager).loadAsync(modelUrl);
+  return wrapMMD(mmd, modelName, keepMorphs);
+}
+
+export function entriesFromFileList(files) {
+  return Array.from(files, (f) => ({ path: f.webkitRelativePath || f.name, blob: f }));
+}
+
+// fflate returns non-UTF-8 zip names as latin1; re-decode as Shift_JIS (JP) or GBK (CN).
+export function entriesFromZip(buffer, legacyEncoding = 'shift_jis') {
+  const dec = new TextDecoder(legacyEncoding);
+  const fix = (n) => (/^[\x00-\xff]*$/.test(n) && /[\x80-\xff]/.test(n) ? dec.decode(Uint8Array.from(n, (c) => c.charCodeAt(0))) : n);
+  return Object.entries(unzipSync(new Uint8Array(buffer)))
+    .filter(([n]) => !n.endsWith('/'))
+    .map(([n, data]) => ({ path: fix(n), blob: new Blob([data]) }));
 }
 
 export const BONE_KEYS = ['hips', 'chest', 'neck', 'head', 'leftUpperArm', 'rightUpperArm', 'leftLowerArm', 'rightLowerArm'];
