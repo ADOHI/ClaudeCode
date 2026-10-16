@@ -52,6 +52,8 @@ $PY -m bustfield.schema out.params.json
   each iteration); if that does not converge, ridge and a Jacobian smoothness penalty are
   raised and the fit is repeated. The gate is a property of the whole param set: distilling
   a subset of targets cannot fix combos that only use the others (the CLI says so).
+  Measured on the synthetic rig (teacher min det 0.09): penalty-only reaches the gate at
+  ridge 1e-3 / Jacobian 0.1 with 4.9 % skin RMS; the det-constrained QP gets 0.26 at 0.8 %.
 
 ## Verified numbers (Changli export, S = 2.567, 2998 skin + clothes vertices in the window)
 
@@ -63,6 +65,7 @@ $PY -m bustfield.schema out.params.json
 | same on Michelle (304 skin verts) / Seed-san (layered wear meshes) | 1.34 % / 0.93 %, gate 0.261 / 0.237 (teachers 0.127 / 0.093) |
 | synthetic anisotropic inflation teacher (not windowed) | skin RMS 1.32 %; gate 0.238 |
 | round trip of distilled params through field.js | 1.5e-17 S |
+| distilled params in the real viewer (Changli, `__bust.setParams` + `validate()`) | JS fieldCheck 0.2377 (= Python), 0 flipped triangles, 0 seam mismatch, normal error p95 5.8° (hand-tuned 6.0°) |
 | profile fit "rounder upper pole, +10 % projection" (stylized) | profile RMS 0.0200 S → 0.0006 S (0.3 % of the 0.222 S apex projection), max 0.0022 S; gate 0.238 |
 | frontal silhouette (synthetic torso, +0.012 S lateral bulge, with a sagittal target) | contour RMS 0.0064 → 0.0017 S, profile 0.0125 → 0.0009 S |
 

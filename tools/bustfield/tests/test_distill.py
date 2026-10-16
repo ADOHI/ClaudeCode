@@ -105,6 +105,19 @@ def test_gate_repair_on_folding_teacher(frame, synth):
     assert max(st["rel_rms"] for st in res.skin.values()) <= 0.03
 
 
+def test_penalty_fallback_without_qp(frame, synth):
+    """Spec fallback (no det constraints): ridge + Jacobian smoothing are raised
+    until the gate passes. It gets there, but at a much larger fit error than
+    the det-constrained QP (measured: ~4.9 % vs ~0.8 % on this rig), which is
+    why the QP is the default."""
+    params, V, N, _ = synth
+    field = BustField(frame, params)
+    samples = D.make_samples(field, V, N, TARGETS, D.field_teacher(frame, params))
+    res = D.fit_targets(frame, params, samples, TARGETS, D.Dictionary.lattice(), max_qp_iter=0, max_retries=4)
+    assert len(res.history) > 1 and res.history[-1]["jac"] > 0
+    assert res.gate["passed"], res.gate
+
+
 def test_synthetic_analytic_target(frame, synth, self_distilled):
     params, V, N, _ = synth
     base = self_distilled[0].params
