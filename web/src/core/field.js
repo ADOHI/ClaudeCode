@@ -136,6 +136,23 @@ export function falloff(t, hard) {
   return 1 - u * u * u * (u * (u * 6 - 15) + 10);
 }
 
+/**
+ * Linear brush: u = A r (A row-major 3x3), times a C2 bump falloff(|r|/eps, 0)
+ * when eps > 0. Exactly A at the centre, so its Jacobian there is A.
+ */
+export function linearBrush(r, A, eps = 0) {
+  let f = 1;
+  if (eps > 0) {
+    f = falloff(Math.hypot(r[0], r[1], r[2]) / eps, 0);
+    if (f === 0) return [0, 0, 0];
+  }
+  return [
+    f * (A[0] * r[0] + A[1] * r[1] + A[2] * r[2]),
+    f * (A[3] * r[0] + A[4] * r[1] + A[5] * r[2]),
+    f * (A[6] * r[0] + A[7] * r[1] + A[8] * r[2]),
+  ];
+}
+
 export function createBustField(frame, params = DEFAULT_PARAMS) {
   const S = frame.S;
   const P = params;
@@ -166,8 +183,10 @@ export function createBustField(frame, params = DEFAULT_PARAMS) {
       at: [op.at[0] * S, op.at[1] * S, op.at[2] * S + depth],
       d: op.d ? op.d.map((v) => v * S) : null,
       k: op.k ?? 0,
-      eps: op.radius * S,
+      eps: (op.radius ?? 0) * S,
       nu: op.nu ?? 0.45,
+      A: op.A ?? null, // linear op: dimensionless 3x3 (strain / small rotation), no S scaling
+      parity: op.parity ?? 1,
     }));
   }
 
@@ -208,8 +227,17 @@ export function createBustField(frame, params = DEFAULT_PARAMS) {
     ];
   }
 
-  // Unwindowed brush sum in the side frame.
-  function brushes(name, q) {
+  // Unwindowed brush sum in the side frame of side `s` (+1 left, -1 right).
+  //
+  // 'linear' ops give u = A r (r = q - at, side frame), optionally localized
+  // by a C2 bump of `radius`: an affine field is what a linearized
+  // stylization (squash tensor, small rotation, shear) is, and it stays
+  // linear in A so blend-shape superposition is exact (vskin.js).
+  // `parity: -1` makes an op antisymmetric across the midline (negated on the
+  // right side). Side frames are mirror images, so plain ops can only express
+  // mirror-symmetric motion; in-phase lateral sway, roll and yaw responses
+  // of the two breasts are antisymmetric in side-frame terms (modal.js).
+  function brushes(name, q, s = 1) {
     const ops = targets[name];
     if (!ops) throw new Error(`unknown target ${name}`);
     let u = [0, 0, 0];
@@ -218,8 +246,9 @@ export function createBustField(frame, params = DEFAULT_PARAMS) {
       let v;
       if (op.type === 'grab') v = physical ? grab(r, op.d, op.eps, op.nu) : grabSmooth(r, op.d, op.eps);
       else if (op.type === 'scale') v = physical ? scaleBrush(r, op.k, op.eps, op.nu) : scaleSmooth(r, op.k, op.eps);
+      else if (op.type === 'linear') v = linearBrush(r, op.A, op.eps);
       else throw new Error(`unknown brush ${op.type}`);
-      u = add(u, v);
+      u = op.parity < 0 && s < 0 ? sub(u, v) : add(u, v);
     }
     return u;
   }
@@ -256,7 +285,7 @@ export function createBustField(frame, params = DEFAULT_PARAMS) {
       const w = sideWeight(side, p, q);
       if (w === 0) continue;
       any = true;
-      out = add(out, scale(fromSideVec(side, brushes(name, q)), w));
+      out = add(out, scale(fromSideVec(side, brushes(name, q, side.s)), w));
     }
     return any ? lockLateral(p, out) : out;
   }
