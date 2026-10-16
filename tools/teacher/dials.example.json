@@ -1,0 +1,12 @@
+{
+  "dials": {
+    "growth": 0.35,
+    "anisotropy": 0.6,
+    "gravity": 5.0,
+    "lift": 0.7,
+    "ligament": 0.06,
+    "skinTension": 0.03,
+    "lateral": 6.0,
+    "nu": 0.45
+  }
+}

@@ -1,0 +1,510 @@
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import GUI from 'lil-gui';
+import { loadModel, resolveBones, collectMeshes, entriesFromFileList, entriesFromZip } from './model.js';
+import { BustRig } from './rig.js';
+import { DEFAULT_PARAMS, cloneParams, buildBodyFrame } from '../core/field.js';
+import { BustDynamics, DEFAULT_DYNAMICS, DEFAULT_POSE, poseCorrective, combineWeights } from '../core/runtime.js';
+
+const qs = new URLSearchParams(location.search);
+const DEFAULT_MODEL = qs.get('model') ?? `${import.meta.env.BASE_URL}models/Seed-san.vrm`;
+
+// ---------------------------------------------------------------- state
+const state = {
+  sliders: { size: 0, style: 0.5, lift: 0, spread: 0 },
+  params: cloneParams(DEFAULT_PARAMS),
+  dyn: { ...DEFAULT_DYNAMICS },
+  pose: { ...DEFAULT_POSE },
+  anim: { play: false, armDown: 65, bob: 0.035, bobHz: 1.8, armCycle: false },
+  view: { heatmap: false, gizmo: false, hud: qs.get('hud') !== '0', autoFit: true },
+};
+
+// ---------------------------------------------------------------- three
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.getElementById('app').appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x2a2d34);
+const camera = new THREE.PerspectiveCamera(30, innerWidth / innerHeight, 0.01, 100);
+camera.position.set(0, 1.4, 2.5);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+const hemi = new THREE.HemisphereLight(0xffffff, 0x445066, 1.2);
+scene.add(hemi);
+const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+sun.position.set(1.2, 2.5, 2.0);
+scene.add(sun);
+function setLighting(kind) {
+  // MMD toon shading expects roughly MMD's default light (~0.6 directional + ambient)
+  hemi.intensity = kind === 'mmd' ? 0.15 : 1.2;
+  sun.intensity = kind === 'mmd' ? 1.5 : 2.2;
+}
+const grid = new THREE.GridHelper(4, 16, 0x555b66, 0x3a3e46);
+scene.add(grid);
+
+const gizmo = new THREE.Group();
+gizmo.matrixAutoUpdate = false;
+scene.add(gizmo);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ---------------------------------------------------------------- model
+let model = null; // { root, vrm, name, rig, bones, restFrame, rest }
+let report = null;
+const dynamics = new BustDynamics(state.dyn);
+const hud = document.getElementById('hud');
+const statusEl = document.getElementById('status');
+
+function worldPos(o) {
+  return o.getWorldPosition(new THREE.Vector3()).toArray();
+}
+
+async function open(source) {
+  statusEl.textContent = 'loading…';
+  if (model) {
+    scene.remove(model.root);
+    model = null;
+  }
+  const loaded = await loadModel(source, { keepMorphs: qs.get('keepMorphs') === '1' });
+  scene.add(loaded.root);
+  loaded.root.updateMatrixWorld(true);
+  const bones = resolveBones(loaded.root, loaded.vrm);
+  const meshes = collectMeshes(loaded.root);
+  const rig = new BustRig({ ...loaded, meshes, bones });
+  model = { ...loaded, rig, bones };
+  setLighting(loaded.mmd ? 'mmd' : 'default');
+  const missing = rig.missingBones();
+  if (missing.length) {
+    report = { error: `필수 본을 찾지 못함: ${missing.join(', ')}` };
+    renderHud();
+    statusEl.textContent = 'missing bones';
+    return;
+  }
+  // World-space rest frame (for posing / camera); bind frame lives in rig.
+  model.restFrame = buildBodyFrame({
+    hips: worldPos(bones.hips),
+    chest: worldPos(bones.chest),
+    neck: worldPos(bones.neck),
+    leftUpperArm: worldPos(bones.leftUpperArm),
+    rightUpperArm: worldPos(bones.rightUpperArm),
+  });
+  model.chestBindInv = new THREE.Matrix4();
+  setupPosing();
+  rig.prepare(state.params.mask);
+  if (state.view.autoFit) autoFit(false);
+  rebake();
+  setView('threeQuarter');
+  statusEl.textContent = loaded.name;
+}
+
+function autoFit(doBake = true) {
+  const fit = model.rig.autoFit(state.params);
+  model.fit = fit;
+  if (fit) {
+    state.params.anchor = {
+      x: +fit.anchor.x.toFixed(3),
+      y: +fit.anchor.y.toFixed(3),
+      z: +fit.anchor.z.toFixed(3),
+    };
+    gui.controllersRecursive().forEach((c) => c.updateDisplay());
+  }
+  if (doBake) rebake();
+}
+
+function rebake() {
+  if (!model?.rig?.frame) return;
+  const r = model.rig.bake(state.params);
+  report = { bake: r, validation: null };
+  buildGizmo();
+  renderHud();
+}
+
+function runValidation() {
+  if (!model?.rig?.field) return null;
+  report.validation = model.rig.validate();
+  renderHud();
+  return report.validation;
+}
+
+// ---------------------------------------------------------------- posing
+function setupPosing() {
+  const { vrm, bones } = model;
+  const node = (k) => (vrm ? vrm.humanoid.getNormalizedBoneNode(k) : bones[k]);
+  // Body bob moves the lowest common ancestor of hips and chest: for MMD
+  // rigs 下半身 (hips) is a sibling of 上半身, so moving it alone would tear
+  // the body apart.
+  const hips = node('hips'), chest = vrm ? node('hips') : bones.chest;
+  const chain = new Set();
+  for (let o = hips; o; o = o.parent) chain.add(o);
+  let mover = chest;
+  while (mover && !chain.has(mover)) mover = mover.parent;
+  model.pose = {
+    mover: mover ?? hips,
+    lua: node('leftUpperArm'),
+    rua: node('rightUpperArm'),
+  };
+  // Rest arm elevation (90 = T-pose, ~40-50 = A-pose MMD rigs); posing is
+  // expressed as an absolute elevation so every rig ends up in the same pose.
+  const f = model.restFrame;
+  const elev = (a, b) => {
+    if (!a || !b) return 90;
+    const d = new THREE.Vector3(...worldPos(b)).sub(new THREE.Vector3(...worldPos(a))).normalize();
+    return THREE.MathUtils.radToDeg(Math.acos(THREE.MathUtils.clamp(-d.dot(new THREE.Vector3(...f.up)), -1, 1)));
+  };
+  model.rest = {
+    moverPos: model.pose.mover.position.clone(),
+    lua: model.pose.lua.quaternion.clone(),
+    rua: model.pose.rua.quaternion.clone(),
+    luaDeg: elev(bones.leftUpperArm, bones.leftLowerArm),
+    ruaDeg: elev(bones.rightUpperArm, bones.rightLowerArm),
+  };
+}
+
+const _q = new THREE.Quaternion(), _pq = new THREE.Quaternion(), _v = new THREE.Vector3();
+function rotateAboutWorldAxis(bone, restLocal, axis, angle) {
+  bone.parent.getWorldQuaternion(_pq);
+  _q.setFromAxisAngle(_v.fromArray(axis), angle);
+  bone.quaternion.copy(_pq).invert().multiply(_q).multiply(_pq).multiply(restLocal);
+}
+
+function applyPose(t) {
+  const f = model.restFrame;
+  const { anim } = state;
+  let down = anim.armDown;
+  if (anim.play && anim.armCycle) {
+    const s = 0.5 - 0.5 * Math.cos(2 * Math.PI * 0.18 * t);
+    down = THREE.MathUtils.lerp(anim.armDown, -80, s);
+  }
+  // `down` is measured from the T-pose: target elevation = 90 - down.
+  const target = 90 - down;
+  const aL = THREE.MathUtils.degToRad(model.rest.luaDeg - target);
+  const aR = THREE.MathUtils.degToRad(model.rest.ruaDeg - target);
+  rotateAboutWorldAxis(model.pose.lua, model.rest.lua, f.forward, -aL);
+  rotateAboutWorldAxis(model.pose.rua, model.rest.rua, f.forward, aR);
+  const hips = model.pose.mover;
+  hips.position.copy(model.rest.moverPos);
+  if (anim.play && anim.bob > 0) {
+    // bouncy "walk" bob: |sin| gives a sharp contact each step
+    const y = (Math.abs(Math.sin(Math.PI * anim.bobHz * t)) - 0.6) * anim.bob * f.S;
+    const up = _v.fromArray(f.up).multiplyScalar(y);
+    hips.parent.updateWorldMatrix(true, false);
+    const inv = new THREE.Matrix3().setFromMatrix4(hips.parent.matrixWorld).invert();
+    hips.position.add(up.applyMatrix3(inv));
+  }
+}
+
+// ---------------------------------------------------------------- gizmo
+function buildGizmo() {
+  gizmo.clear();
+  const { rig } = model;
+  const field = rig.field;
+  const S = field.S;
+  const f = field.frame;
+  const mk = (color) => new THREE.LineBasicMaterial({ color, depthTest: false, transparent: true, opacity: 0.9 });
+  for (const side of field.sides) {
+    const ax = side.xAxis;
+    const W = state.params.window;
+    const pts = [];
+    for (let i = 0; i <= 64; i++) {
+      const th = (i / 64) * Math.PI * 2;
+      const c = Math.cos(th), s = Math.sin(th);
+      const ry = s >= 0 ? W.yUp : W.yDown;
+      const x = c * W.x * S, y = s * ry * S;
+      pts.push(new THREE.Vector3(
+        side.base[0] + ax[0] * x + f.up[0] * y,
+        side.base[1] + ax[1] * x + f.up[1] * y,
+        side.base[2] + ax[2] * x + f.up[2] * y,
+      ));
+    }
+    const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), mk(0x4ad7ff));
+    line.renderOrder = 10;
+    gizmo.add(line);
+    const seg = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(...side.base), new THREE.Vector3(...side.apex)]), mk(0xffd24a));
+    seg.renderOrder = 10;
+    gizmo.add(seg);
+    for (const [p, col] of [[side.base, 0x4ad7ff], [side.apex, 0xffd24a]]) {
+      const s = new THREE.Mesh(new THREE.SphereGeometry(0.012 * S / 0.3, 12, 8), new THREE.MeshBasicMaterial({ color: col, depthTest: false }));
+      s.position.set(...p);
+      s.renderOrder = 11;
+      gizmo.add(s);
+    }
+  }
+  model.chestBindInv.copy(bindMatrixOf(model.bones.chest)).invert();
+  gizmo.visible = state.view.gizmo;
+}
+
+function bindMatrixOf(bone) {
+  for (const m of model.rig.meshes) {
+    if (!m.isSkinnedMesh) continue;
+    const i = m.skeleton.bones.indexOf(bone);
+    if (i >= 0) return new THREE.Matrix4().copy(m.skeleton.boneInverses[i]).invert();
+  }
+  return bone.matrixWorld.clone();
+}
+
+// ---------------------------------------------------------------- camera
+function setView(name) {
+  if (!model?.restFrame) return;
+  const f = model.restFrame;
+  const S = f.S;
+  const v3 = (a) => new THREE.Vector3(...a);
+  // Aim at the midpoint of the two apexes (bind space ~ world at rest).
+  // Apexes live in bind space (e.g. MMD units); map them to world through
+  // the chest bone (same transform the gizmo uses).
+  const sides = model.rig?.field?.sides;
+  let target;
+  if (sides) {
+    model.bones.chest.updateWorldMatrix(true, false);
+    const bindToWorld = model.bones.chest.matrixWorld.clone().multiply(model.chestBindInv);
+    target = v3(sides[0].apex).add(v3(sides[1].apex)).multiplyScalar(0.5).applyMatrix4(bindToWorld).addScaledVector(v3(f.up), 0.05 * S);
+  } else {
+    target = v3(f.origin).addScaledVector(v3(f.up), 0.1 * S).addScaledVector(v3(f.forward), 0.25 * S);
+  }
+  const dirs = {
+    front: [v3(f.forward), 2.6],
+    side: [v3(f.left).negate(), 2.6],
+    threeQuarter: [v3(f.forward).multiplyScalar(0.8).addScaledVector(v3(f.left), -0.6).normalize(), 2.8],
+    closeFront: [v3(f.forward), 2.8],
+    closeSide: [v3(f.left).negate(), 3.0],
+    full: [v3(f.forward).multiplyScalar(0.9).addScaledVector(v3(f.left), -0.35).normalize(), 7.5],
+  };
+  const [dir, dist] = dirs[name] ?? dirs.threeQuarter;
+  const fullTarget = name === 'full' ? v3(f.origin).addScaledVector(v3(f.up), -1.2 * S) : target;
+  camera.position.copy(fullTarget).addScaledVector(dir, dist * S).addScaledVector(v3(f.up), 0.15 * S);
+  controls.target.copy(fullTarget);
+  controls.update();
+}
+
+// ---------------------------------------------------------------- HUD
+const fmt = (x, d = 3) => (x === undefined || x === null || Number.isNaN(x) ? '-' : Number(x).toFixed(d));
+function renderHud() {
+  hud.classList.toggle('hidden', !state.view.hud);
+  if (!state.view.hud) return;
+  const L = [];
+  if (!model) {
+    hud.textContent = 'loading…';
+    return;
+  }
+  L.push(`<b>${model.name}</b>`);
+  const b = model.bones;
+  L.push(`bones: ${Object.entries(b).map(([k, v]) => `${k}=${v ? v.name : '<span class=bad>?</span>'}`).join(', ')}`);
+  if (report?.error) L.push(`<span class=bad>${report.error}</span>`);
+  if (report?.bake) {
+    const r = report.bake;
+    L.push(`bake: ${fmt(r.ms, 0)} ms, ${r.touched} verts on ${r.meshes} meshes, S=${fmt(model.rig.frame.S)}`);
+    const fit = model.fit;
+    L.push(fit
+      ? `auto-fit: anchor ${fmt(fit.anchor.x)}, ${fmt(fit.anchor.y)}, ${fmt(fit.anchor.z)}  prominence ${fmt(fit.prominence)}${fit.usedPrior ? ' <span class=warn>(flat chest → anatomical prior)</span>' : ''}`
+      : '<span class=warn>auto-fit failed, using manual anchor</span>');
+    const per = model.rig.baked.map((e) => `${e.mesh.name || '(mesh)'}:${e.result.touched}`);
+    L.push(`  ${per.join('  ')}`);
+  }
+  const v = report?.validation;
+  if (v) {
+    const f = v.field;
+    L.push(`<b>validation</b> (${fmt(v.ms, 0)} ms)`);
+    L.push(`field min det(F) = <span class=${f.minDet > 0.2 ? 'ok' : f.minDet > 0 ? 'warn' : 'bad'}>${fmt(f.minDet)}</span> @ ${f.minCombo}  (${f.samples} samples)`);
+    L.push('volume change (mean / max |Δ|):');
+    for (const [t, x] of Object.entries(f.volume)) L.push(`  ${t.padEnd(22)} ${fmt(x.meanChange * 100, 1).padStart(6)}%  ${fmt(x.maxAbsChange * 100, 1).padStart(6)}%`);
+    if (v.mesh) {
+      const m = v.mesh;
+      const seamWorst = Math.max(...Object.values(m.seamMismatchRel));
+      L.push(`seams: ${m.coincidentVertices} coincident verts, worst mismatch <span class=${seamWorst < 1e-3 ? 'ok' : 'warn'}>${fmt(seamWorst * 100, 3)}%</span> of max Δ`);
+      L.push(`flipped triangles: <span class=${m.flippedTriangles === 0 ? 'ok' : 'bad'}>${m.flippedTriangles}</span> over all slider extremes (${m.movingTriangles} moving tris)${m.worstCombo ? ' worst ' + m.worstCombo : ''}`);
+    }
+    if (v.normals) {
+      const n = v.normals;
+      L.push(`normals (analytic F^-T vs geometric, ${n.target}): median ${fmt(n.median, 2)}°, p95 ${fmt(n.p95, 2)}°`);
+    }
+  }
+  if (model.weights) {
+    L.push('<b>weights</b>');
+    L.push(Object.entries(model.weights).filter(([, w]) => w > 0.001).map(([k, w]) => `${k}=${fmt(w, 2)}`).join('  ') || '(all 0)');
+  }
+  if (model.poseInfo?.armDeg !== undefined) L.push(`arm elevation ${fmt(model.poseInfo.armDeg, 0)}°`);
+  hud.innerHTML = L.join('\n');
+}
+
+// ---------------------------------------------------------------- GUI
+const gui = new GUI({ title: 'Bust Morph Lab' });
+const fS = gui.addFolder('Sliders (blend shapes)');
+fS.add(state.sliders, 'size', -1, 1, 0.01).name('size −/+');
+fS.add(state.sliders, 'style', 0, 1, 0.01).name('style natural→stylized');
+fS.add(state.sliders, 'lift', -1, 1, 0.01).name('lift');
+fS.add(state.sliders, 'spread', -1, 1, 0.01).name('spread in/out');
+
+const fA = gui.addFolder('Animation / runtime');
+fA.add(state.anim, 'play');
+fA.add(state.anim, 'armDown', -80, 85, 1).name('arm down (deg)');
+fA.add(state.anim, 'armCycle').name('arm raise cycle');
+fA.add(state.anim, 'bob', 0, 0.1, 0.001).name('body bob (S)');
+fA.add(state.anim, 'bobHz', 0.5, 4, 0.1);
+fA.add(state.dyn, 'enabled').name('jiggle (bone-free)').onChange(() => Object.assign(dynamics.o, state.dyn));
+for (const [k, lo, hi] of [['frequency', 0.5, 6], ['damping', 0.02, 1], ['gain', 0, 3], ['squashStretch', 0, 1.5]]) {
+  fA.add(state.dyn, k, lo, hi, 0.01).onChange(() => Object.assign(dynamics.o, state.dyn));
+}
+fA.add(state.pose, 'enabled').name('pose corrective');
+fA.add(state.pose, 'lift', 0, 1, 0.01).name('arm-raise lift');
+
+const fR = gui.addFolder('Region / kernel (rebake)');
+fR.add(state.params, 'kernel', ['kelvinlet', 'smooth']).onChange(rebake);
+fR.add(state.params.anchor, 'x', 0.05, 0.5, 0.005).name('anchor x').onFinishChange(rebake);
+fR.add(state.params.anchor, 'y', -0.5, 0.5, 0.005).name('anchor y').onFinishChange(rebake);
+fR.add(state.params.anchor, 'z', -0.3, 0.6, 0.005).name('anchor z (base)').onFinishChange(rebake);
+fR.add(state.params, 'depth', 0.05, 0.4, 0.005).onFinishChange(rebake);
+for (const k of ['x', 'yUp', 'yDown', 'zFront', 'zBack', 'hardness', 'hardnessZ']) {
+  fR.add(state.params.window, k, 0, k.startsWith('hard') ? 0.95 : 1.5, 0.005).name(`window ${k}`).onFinishChange(rebake);
+}
+fR.add(state.params.mask, 'excludeArms').onChange(() => { model.rig.prepare(state.params.mask); rebake(); });
+fR.add(state.params.mask, 'excludeHead').onChange(() => { model.rig.prepare(state.params.mask); rebake(); });
+fR.add({ autoFit: () => autoFit(true) }, 'autoFit').name('auto-fit anchors');
+fR.close();
+
+const fV = gui.addFolder('View / tools');
+fV.add(state.view, 'heatmap').onChange((on) => model?.rig.setHeatmap(on));
+fV.add(state.view, 'gizmo').onChange((on) => (gizmo.visible = on));
+fV.add(state.view, 'hud').onChange(renderHud);
+const views = { front: () => setView('front'), side: () => setView('side'), threeQuarter: () => setView('threeQuarter'), closeFront: () => setView('closeFront') };
+for (const k of Object.keys(views)) fV.add(views, k);
+fV.add({ validate: runValidation }, 'validate').name('run validation');
+fV.add({ exportParams }, 'exportParams').name('export params JSON');
+fV.add({ load: () => fileInput.click() }, 'load').name('load model / zip…');
+fV.add({ loadDir: () => dirInput.click() }, 'loadDir').name('load PMX folder…');
+
+function exportParams() {
+  const data = {
+    format: 'bust-morph-params/1',
+    note: 'Lengths in S = distance between upper-arm joints. Body frame: right-handed, forward = cross(left, up).',
+    bones: Object.fromEntries(Object.entries(model.bones).map(([k, v]) => [k, v?.name ?? null])),
+    params: state.params,
+    sliders: state.sliders,
+    dynamics: state.dyn,
+    pose: state.pose,
+  };
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
+  a.download = 'bust-morph-params.json';
+  a.click();
+}
+
+// ---------------------------------------------------------------- files
+const fileInput = Object.assign(document.createElement('input'), { type: 'file', multiple: true, accept: '.vrm,.glb,.gltf,.fbx,.pmx,.pmd,.zip' });
+fileInput.onchange = () => openFiles(fileInput.files).catch(fail);
+const dirInput = Object.assign(document.createElement('input'), { type: 'file', webkitdirectory: true });
+dirInput.onchange = () => openFiles(dirInput.files).catch(fail);
+const drop = document.getElementById('drop');
+addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('on'); });
+addEventListener('dragleave', () => drop.classList.remove('on'));
+addEventListener('drop', async (e) => {
+  e.preventDefault();
+  drop.classList.remove('on');
+  // Dropped folders: walk directory entries so PMX textures come along.
+  const items = [...(e.dataTransfer.items ?? [])].map((i) => i.webkitGetAsEntry?.()).filter(Boolean);
+  if (items.some((it) => it.isDirectory)) {
+    const files = [];
+    await Promise.all(items.map((it) => walkEntry(it, '', files)));
+    openEntries(files, items[0].name).catch(fail);
+  } else {
+    openFiles(e.dataTransfer.files).catch(fail);
+  }
+});
+
+function walkEntry(entry, prefix, out) {
+  if (entry.isFile) return new Promise((res) => entry.file((f) => { out.push({ path: prefix + f.name, blob: f }); res(); }, res));
+  const reader = entry.createReader();
+  return new Promise((res) => {
+    const all = [];
+    const next = () => reader.readEntries(async (batch) => {
+      if (!batch.length) {
+        await Promise.all(all.map((c) => walkEntry(c, `${prefix}${entry.name}/`, out)));
+        res();
+      } else { all.push(...batch); next(); }
+    }, res);
+    next();
+  });
+}
+
+async function openFiles(fileList) {
+  const files = [...fileList];
+  if (!files.length) return;
+  const zip = files.find((f) => /\.zip$/i.test(f.name));
+  if (zip) return openEntries(entriesFromZip(await zip.arrayBuffer(), qs.get('zipEncoding') ?? 'shift_jis'), zip.name);
+  if (files.length > 1 || files.some((f) => /\.(pmx|pmd)$/i.test(f.name))) return openEntries(entriesFromFileList(files), files[0].name);
+  return open(files[0]);
+}
+
+function openEntries(entries, name) {
+  return open({ entries, name });
+}
+
+function fail(err) {
+  console.error(err);
+  statusEl.textContent = `error: ${err.message}`;
+  report = { error: String(err.message ?? err) };
+  renderHud();
+}
+
+// ---------------------------------------------------------------- loop
+const clock = new THREE.Clock();
+let simTime = 0;
+let hudTimer = 0;
+function frame(dt) {
+  simTime += dt;
+  if (model?.rig?.field) {
+    applyPose(simTime);
+    model.vrm?.update(dt);
+    model.root.updateMatrixWorld(true);
+    const f = model.restFrame;
+    const dyn = dynamics.update(dt, worldPos(model.bones.chest), f.up, f.S);
+    const b = model.bones;
+    const pc = b.leftLowerArm && b.rightLowerArm
+      ? poseCorrective(worldPos(b.leftUpperArm), worldPos(b.leftLowerArm), worldPos(b.rightUpperArm), worldPos(b.rightLowerArm), f.up, state.pose)
+      : { lift: 0, spread: 0 };
+    model.poseInfo = pc;
+    model.weights = combineWeights(state.sliders, dyn, pc);
+    model.rig.setWeights(model.weights);
+    // gizmo follows the chest
+    gizmo.matrix.copy(model.bones.chest.matrixWorld).multiply(model.chestBindInv);
+  }
+  controls.update();
+  renderer.render(scene, camera);
+  hudTimer += dt;
+  if (hudTimer > 0.25) {
+    hudTimer = 0;
+    renderHud();
+  }
+}
+renderer.setAnimationLoop(() => frame(Math.min(clock.getDelta(), 0.05)));
+
+// ---------------------------------------------------------------- test hook
+window.__bust = {
+  state,
+  open: (url) => open(url),
+  setSliders: (s) => Object.assign(state.sliders, s),
+  setParams: (fn) => { fn(state.params); rebake(); },
+  setAnim: (a) => Object.assign(state.anim, a),
+  setDyn: (d) => { Object.assign(state.dyn, d); Object.assign(dynamics.o, state.dyn); dynamics.reset(); },
+  setView,
+  setHeatmap: (on) => { state.view.heatmap = on; model?.rig.setHeatmap(on); },
+  setGizmo: (on) => { state.view.gizmo = on; gizmo.visible = on; },
+  setHud: (on) => { state.view.hud = on; renderHud(); },
+  validate: () => runValidation(),
+  exportBind: () => model?.rig?.exportBind(),
+  report: () => report,
+  // deterministic stepping for screenshots
+  step: (dt, n = 1) => { for (let i = 0; i < n; i++) frame(dt); },
+  pause: () => renderer.setAnimationLoop(null),
+  ready: false,
+};
+
+open(DEFAULT_MODEL)
+  .then(() => { window.__bust.ready = true; })
+  .catch(fail);

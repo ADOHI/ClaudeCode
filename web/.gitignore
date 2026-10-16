@@ -1,0 +1,6 @@
+node_modules/
+dist/
+shots/
+public/models/*
+!public/models/.gitkeep
+.cache/
