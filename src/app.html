@@ -1,0 +1,412 @@
+<title>루미나 학원도시</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Do+Hyeon&family=IBM+Plex+Sans+KR:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* 레이아웃: 전면 3D 스테이지 위에 관제 콘솔형 패널 — 좌(레이어/규칙) · 우(인스펙터/지표) · 상단(시드/모드) */
+:root {
+  --bg: #e9eef8;
+  --panel: rgba(250, 251, 255, 0.92);
+  --panel-solid: #fafbff;
+  --line: rgba(29, 36, 64, 0.12);
+  --ink: #1d2440;
+  --ink-2: #4a5272;
+  --muted: #7b8299;
+  --accent: #2f6bff;
+  --accent-ink: #ffffff;
+  --halo: #ffc93c;
+  --secret: #d946a6;
+  --good: #1f9d6b;
+  --mid: #e0a100;
+  --low: #e04646;
+  --chip: #eef1fa;
+  --shadow: 0 10px 30px rgba(29, 36, 64, 0.14);
+  --font-display: 'Do Hyeon', 'IBM Plex Sans KR', system-ui, sans-serif;
+  --font-body: 'IBM Plex Sans KR', system-ui, -apple-system, 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1322; --panel: rgba(20, 25, 42, 0.9); --panel-solid: #151a2c; --line: rgba(220, 228, 255, 0.12);
+    --ink: #e8ecff; --ink-2: #b7bfdc; --muted: #8890ad; --accent: #6f9bff; --accent-ink: #0b1020; --chip: #1f2640;
+    --shadow: 0 10px 30px rgba(0, 0, 0, 0.45); color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1322; --panel: rgba(20, 25, 42, 0.9); --panel-solid: #151a2c; --line: rgba(220, 228, 255, 0.12);
+  --ink: #e8ecff; --ink-2: #b7bfdc; --muted: #8890ad; --accent: #6f9bff; --accent-ink: #0b1020; --chip: #1f2640;
+  --shadow: 0 10px 30px rgba(0, 0, 0, 0.45); color-scheme: dark;
+}
+[hidden] { display: none !important; }
+html, body { height: 100%; }
+body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 13px; overflow: hidden; }
+#app { position: fixed; inset: 0; }
+#stage { position: absolute; inset: 0; }
+#stage canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.muted { color: var(--muted); }
+button { font: inherit; color: inherit; }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* 상단 바 */
+.topbar {
+  position: absolute; top: 0; left: 0; right: 0; z-index: 20; display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+  padding-top: max(10px, env(safe-area-inset-top, 0px)); padding-bottom: 10px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  pointer-events: none;
+}
+.topbar > * { pointer-events: auto; }
+.brand { display: flex; align-items: baseline; gap: 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 7px 14px; box-shadow: var(--shadow); backdrop-filter: blur(10px); }
+.brand .mark { font-family: var(--font-display); font-size: 22px; letter-spacing: 0.06em; line-height: 1; }
+.brand .mark i { font-style: normal; color: var(--accent); }
+.brand small { color: var(--ink-2); font-size: 12px; }
+.seedbox { display: flex; gap: 6px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 5px 6px 5px 12px; box-shadow: var(--shadow); backdrop-filter: blur(10px); }
+.seedbox label { font-size: 11px; letter-spacing: 0.08em; color: var(--muted); text-transform: uppercase; }
+.seedbox select { border: 1px solid var(--line); background: var(--panel-solid); color: var(--ink); border-radius: 8px; padding: 6px 6px; font: inherit; font-size: 12px; }
+.notes-btn { background: var(--panel); box-shadow: var(--shadow); border-radius: 12px; padding: 9px 14px; backdrop-filter: blur(10px); }
+.seedbox input { width: 128px; border: 1px solid var(--line); background: var(--panel-solid); color: var(--ink); border-radius: 8px; padding: 6px 8px; font-family: var(--font-mono); font-size: 13px; }
+.btn { white-space: nowrap; border: 1px solid var(--line); background: var(--panel-solid); border-radius: 8px; padding: 6px 12px; cursor: pointer; font-weight: 500; }
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+.btn.small { padding: 4px 9px; font-size: 12px; }
+.modes { margin-left: auto; display: flex; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 4px; box-shadow: var(--shadow); backdrop-filter: blur(10px); }
+.modes button { border: 0; background: transparent; padding: 6px 16px; border-radius: 9px; cursor: pointer; font-family: var(--font-display); font-size: 16px; letter-spacing: 0.04em; color: var(--ink-2); }
+.modes button[aria-pressed="true"] { background: var(--ink); color: var(--panel-solid); }
+.toggles { display: none; gap: 6px; }
+
+/* 패널 */
+.panel {
+  position: absolute; top: 64px; bottom: 16px; z-index: 15; width: 292px; overflow-y: auto; overscroll-behavior: contain;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); backdrop-filter: blur(12px);
+  scrollbar-width: thin;
+}
+.panel.left { left: max(16px, env(safe-area-inset-left, 0px)); }
+.panel.right { right: max(16px, env(safe-area-inset-right, 0px)); width: 330px; }
+.panel section { padding: 14px 16px; border-bottom: 1px solid var(--line); }
+.panel section:last-child { border-bottom: 0; }
+.panel h3 { margin: 0 0 10px; font-family: var(--font-display); font-weight: 400; font-size: 17px; letter-spacing: 0.03em; display: flex; justify-content: space-between; align-items: baseline; }
+.panel h3 small { font-family: var(--font-body); font-size: 11px; color: var(--muted); letter-spacing: 0.04em; }
+body.exploring .panel { display: none; }
+
+.layers { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 10px; }
+.layers label { display: flex; gap: 7px; align-items: center; cursor: pointer; padding: 3px 0; color: var(--ink-2); }
+.layers input { accent-color: var(--accent); }
+.sw { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.ovl { display: flex; flex-wrap: wrap; gap: 5px; }
+.ovl button { border: 1px solid var(--line); background: var(--panel-solid); border-radius: 999px; padding: 4px 10px; cursor: pointer; font-size: 12px; color: var(--ink-2); }
+.ovl button[aria-pressed="true"] { background: var(--ink); color: var(--panel-solid); border-color: transparent; }
+#legend { margin-top: 10px; font-size: 11.5px; color: var(--ink-2); line-height: 1.5; min-height: 34px; }
+#legend .ramp { height: 8px; border-radius: 4px; margin: 4px 0 2px; }
+#legend .ends { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; }
+#legend > div { display: none; }
+#legend[data-kind="none"] .lg-none, #legend[data-kind="flow"] .lg-flow, #legend[data-kind="hidden"] .lg-hidden, #legend[data-kind="gap"] .lg-gap, #legend[data-kind="detour"] .lg-detour, #legend[data-kind="district"] .lg-district { display: block; }
+
+.rgroup { margin-bottom: 12px; }
+.rgroup-title { font-size: 11px; letter-spacing: 0.08em; color: var(--muted); margin: 4px 0 6px; }
+.rule { display: grid; grid-template-columns: 1fr auto; width: 100%; text-align: left; border: 1px solid transparent; background: transparent; border-radius: 8px; padding: 6px 8px; cursor: pointer; gap: 2px 8px; }
+.rule:hover { background: var(--chip); }
+.rule[aria-pressed="true"] { border-color: var(--accent); background: var(--chip); }
+.rname { font-weight: 600; font-size: 12.5px; }
+.rcount { color: var(--ink-2); font-size: 12px; }
+.rdesc { grid-column: 1 / -1; color: var(--muted); font-size: 11.5px; line-height: 1.45; display: none; }
+.rule[aria-pressed="true"] .rdesc, .rule:hover .rdesc { display: block; }
+
+.ins-title { font-family: var(--font-display); font-size: 21px; line-height: 1.15; margin-bottom: 8px; text-wrap: balance; }
+.chips { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 10px; }
+.chip { --c: var(--accent); display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; padding: 2px 8px; border-radius: 999px; background: var(--chip); color: var(--ink); border-left: 3px solid var(--c); }
+.chip.ghost { border-left-color: transparent; color: var(--muted); }
+.kv { display: grid; grid-template-columns: 64px 1fr; gap: 6px 10px; margin: 0 0 10px; font-size: 12.5px; line-height: 1.5; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.row { display: flex; gap: 6px; flex-wrap: wrap; }
+.score { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
+.score span { font-size: 30px; font-weight: 500; }
+.score small { color: var(--muted); }
+.metric { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; margin-bottom: 9px; }
+.mlabel { font-weight: 600; font-size: 12.5px; }
+.mnote { display: block; font-weight: 400; color: var(--muted); font-size: 11px; }
+.mval { font-size: 12.5px; align-self: start; }
+.mbar { grid-column: 1 / -1; height: 5px; border-radius: 3px; background: var(--chip); overflow: hidden; }
+.mbar i { display: block; height: 100%; border-radius: 3px; }
+.mbar i.ok { background: var(--good); } .mbar i.mid { background: var(--mid); } .mbar i.low { background: var(--low); }
+.mgrid { display: grid; grid-template-columns: auto 1fr auto 1fr; gap: 4px 10px; font-size: 12px; margin: 12px 0 10px; color: var(--ink-2); }
+.mgrid b { color: var(--ink); font-weight: 500; }
+.secret-types { display: flex; flex-wrap: wrap; gap: 5px; }
+#logs-body, #districts-body { list-style: none; margin: 0; padding: 0; font-size: 12px; line-height: 1.5; color: var(--ink-2); }
+#logs-body li { padding: 3px 0; border-bottom: 1px dashed var(--line); }
+#logs-body b { color: var(--ink); font-weight: 600; margin-right: 4px; }
+#districts-body li { display: grid; grid-template-columns: 10px 1fr; gap: 0 8px; align-items: baseline; padding: 3px 0; }
+#districts-body i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+#districts-body span { grid-column: 2; color: var(--muted); font-size: 11.5px; }
+.json-note { font-size: 11.5px; color: var(--muted); margin: 8px 0 0; line-height: 1.5; }
+
+/* 라벨 */
+.labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 5; }
+.lbl { position: absolute; left: 0; top: 0; white-space: nowrap; font-size: 11.5px; padding: 2px 7px; border-radius: 6px; background: rgba(255, 255, 255, 0.86); color: #1d2440; box-shadow: 0 2px 8px rgba(29, 36, 64, 0.16); will-change: transform; }
+.lbl.district { font-family: var(--font-display); font-size: 19px; background: rgba(29, 36, 64, 0.78); color: #fff; padding: 3px 11px; letter-spacing: 0.04em; }
+.lbl.landmark { background: #ff3d6e; color: #fff; font-weight: 600; }
+.lbl.poi.t1 { background: #1d2440; color: #fff; }
+.lbl.poi.station { background: #12b5a8; color: #fff; }
+.lbl.poi.vantage { background: #fff; color: #1d2440; outline: 1px solid #29e0d0; }
+.lbl.poi.t3 { font-size: 10.5px; opacity: 0.85; }
+.lbl.secret { background: #ffd23d; color: #3b2a00; font-weight: 600; }
+
+/* 강조 배너 / 도움말 */
+#hl-banner { position: absolute; left: 50%; transform: translateX(-50%); top: 64px; z-index: 18; background: var(--ink); color: var(--panel-solid); border-radius: 999px; padding: 6px 8px 6px 14px; display: flex; gap: 10px; align-items: center; box-shadow: var(--shadow); }
+#hl-banner button { background: var(--panel-solid); color: var(--ink); border: 0; border-radius: 999px; padding: 3px 10px; cursor: pointer; }
+.help { position: absolute; left: 50%; transform: translateX(-50%); bottom: max(14px, env(safe-area-inset-bottom, 0px)); z-index: 12; background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 6px 14px; font-size: 12px; color: var(--ink-2); box-shadow: var(--shadow); white-space: nowrap; }
+body.exploring .help { display: none; }
+
+/* 로딩 */
+#loading { position: absolute; inset: 0; z-index: 40; display: grid; place-items: center; background: color-mix(in srgb, var(--bg) 78%, transparent); backdrop-filter: blur(6px); }
+.loadcard { width: min(380px, calc(100vw - 32px)); background: var(--panel-solid); border: 1px solid var(--line); border-radius: 16px; padding: 20px 22px; box-shadow: var(--shadow); }
+.loadcard h2 { margin: 0 0 4px; font-family: var(--font-display); font-weight: 400; font-size: 24px; }
+.loadcard p { margin: 0 0 12px; color: var(--muted); font-size: 12px; }
+.loadtrack { height: 6px; background: var(--chip); border-radius: 3px; overflow: hidden; margin-bottom: 12px; }
+#loadbar { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--halo)); transition: width 0.2s; }
+#stages { list-style: none; margin: 0; padding: 0; font-size: 12.5px; color: var(--ink-2); columns: 2; column-gap: 14px; }
+#stages li::before { content: '…'; display: inline-block; width: 16px; color: var(--accent); }
+#stages li.done::before { content: '✓'; color: var(--good); }
+
+/* 탐험 HUD */
+#hud { position: absolute; inset: 0; z-index: 16; pointer-events: none; }
+#compass { position: absolute; top: max(62px, calc(env(safe-area-inset-top, 0px) + 56px)); left: 50%; transform: translateX(-50%); width: min(560px, calc(100vw - 40px)); height: 34px; background: rgba(15, 20, 38, 0.55); border-radius: 10px; overflow: hidden; color: #fff; }
+#compass::after { content: ''; position: absolute; left: 50%; top: 0; bottom: 0; width: 2px; background: var(--halo); }
+#compass-marks span { position: absolute; top: 50%; transform: translate(-50%, -50%); font-size: 11.5px; white-space: nowrap; }
+#compass-marks .cdir { font-family: var(--font-display); font-size: 16px; color: #ffe9a8; }
+#compass-marks .cspire { color: #ffd23d; font-weight: 600; }
+#compass-marks .clm { color: #fff; opacity: 0.9; }
+.counters { position: absolute; right: max(16px, env(safe-area-inset-right, 0px)); top: max(62px, calc(env(safe-area-inset-top, 0px) + 56px)); display: grid; gap: 6px; }
+.counter { background: rgba(15, 20, 38, 0.6); color: #fff; border-radius: 10px; padding: 6px 12px; display: flex; gap: 10px; justify-content: space-between; min-width: 150px; font-size: 12px; }
+.counter b { font-family: var(--font-mono); font-weight: 500; }
+.counter.secret b { color: #ffd23d; }
+#minimap { position: absolute; right: max(16px, env(safe-area-inset-right, 0px)); bottom: max(16px, env(safe-area-inset-bottom, 0px)); width: 180px; height: 180px; border-radius: 50%; border: 3px solid rgba(255, 255, 255, 0.85); box-shadow: var(--shadow); background: #7cc3ea; }
+#prompt { position: absolute; left: 50%; transform: translateX(-50%); bottom: 120px; background: rgba(15, 20, 38, 0.78); color: #fff; padding: 8px 16px; border-radius: 10px; font-size: 14px; font-weight: 500; }
+#banner { position: absolute; left: 50%; top: 30%; transform: translate(-50%, -50%); text-align: center; color: #fff; opacity: 0; text-shadow: 0 2px 14px rgba(0, 0, 0, 0.5); }
+#banner b { display: block; font-family: var(--font-display); font-weight: 400; font-size: clamp(28px, 5vw, 46px); letter-spacing: 0.04em; border-bottom: 3px solid var(--c, var(--halo)); padding-bottom: 4px; margin-bottom: 6px; }
+#banner span { font-size: 15px; }
+#banner.show { animation: banner 3.2s ease forwards; }
+@keyframes banner { 0% { opacity: 0; transform: translate(-50%, -40%); } 12% { opacity: 1; transform: translate(-50%, -50%); } 75% { opacity: 1; } 100% { opacity: 0; } }
+.exithint { position: absolute; left: max(16px, env(safe-area-inset-left, 0px)); bottom: max(16px, env(safe-area-inset-bottom, 0px)); background: rgba(15, 20, 38, 0.6); color: #fff; border-radius: 10px; padding: 7px 12px; font-size: 12px; line-height: 1.6; }
+.exithint kbd { font-family: var(--font-mono); background: rgba(255, 255, 255, 0.16); border-radius: 4px; padding: 0 5px; }
+#touch { display: none; }
+@media (pointer: coarse) {
+  #touch { display: block; }
+  .exithint { display: none; }
+  #touchpad { position: absolute; left: 24px; bottom: 36px; width: 130px; height: 130px; border-radius: 50%; background: rgba(15, 20, 38, 0.35); pointer-events: auto; touch-action: none; }
+  #stick { position: absolute; left: 40px; top: 40px; width: 50px; height: 50px; border-radius: 50%; background: rgba(255, 255, 255, 0.7); }
+  .tbtn { position: absolute; width: 64px; height: 64px; border-radius: 50%; border: 0; background: rgba(255, 255, 255, 0.78); font-family: var(--font-display); font-size: 16px; pointer-events: auto; color: #1d2440; }
+  #tjump { right: 28px; bottom: 214px; }
+  #tuse { right: 104px; bottom: 214px; }
+}
+
+/* 설계 노트 */
+#notes { position: absolute; inset: 0; z-index: 45; display: grid; place-items: center; background: color-mix(in srgb, var(--bg) 70%, transparent); backdrop-filter: blur(4px); padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.notes-card { width: min(860px, 100%); max-height: min(86vh, 900px); display: flex; flex-direction: column; background: var(--panel-solid); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); }
+.notes-card header { display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid var(--line); }
+.notes-card h2 { margin: 0; font-family: var(--font-display); font-weight: 400; font-size: 26px; }
+.notes-body { overflow-y: auto; padding: 4px 20px 20px; line-height: 1.65; font-size: 13.5px; }
+.notes-body h3 { font-family: var(--font-display); font-weight: 400; font-size: 19px; margin: 18px 0 8px; }
+.notes-body .lede { font-size: 14.5px; max-width: 68ch; }
+.pipeline { margin: 0; padding: 0; list-style: none; display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 6px; counter-reset: st; }
+.pipeline li { counter-increment: st; background: var(--chip); border-radius: 8px; padding: 6px 10px; font-size: 12.5px; display: flex; justify-content: space-between; gap: 8px; }
+.pipeline li::before { content: counter(st, decimal-leading-zero); color: var(--muted); font-family: var(--font-mono); font-size: 11px; margin-right: 6px; }
+.pipeline li span { flex: 1; }
+.pipeline li em { font-style: normal; color: var(--muted); font-family: var(--font-mono); font-size: 11px; }
+.goals { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+.goals > div { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.goals b { font-family: var(--font-display); font-weight: 400; font-size: 18px; }
+.goals p { margin: 4px 0 0; font-size: 12.5px; color: var(--ink-2); }
+.plays, .refs { margin: 0; padding-left: 18px; }
+.plays li, .refs li { margin-bottom: 4px; }
+.refs { font-size: 12.5px; color: var(--ink-2); }
+
+/* 토스트 */
+#toasts { position: absolute; top: 110px; left: 50%; transform: translateX(-50%); z-index: 30; display: grid; gap: 6px; justify-items: center; pointer-events: none; width: min(560px, calc(100vw - 32px)); }
+.toast { background: var(--panel-solid); color: var(--ink); border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 10px; padding: 8px 14px; box-shadow: var(--shadow); font-size: 13px; transition: opacity 0.35s, transform 0.35s; max-width: 100%; }
+.toast.secret { border-left-color: var(--halo); font-weight: 600; }
+.toast.good { border-left-color: var(--good); }
+.toast.warn { border-left-color: var(--low); }
+.toast.poi { border-left-color: #29e0d0; }
+.toast.hint { opacity: 0.92; }
+.toast.out { opacity: 0; transform: translateY(-6px); }
+
+@media (max-width: 760px) {
+  .topbar { gap: 8px; }
+  .brand { padding: 6px 12px; }
+  .brand .mark { font-size: 19px; }
+  .seedbox { padding: 4px 4px 4px 6px; gap: 4px; }
+  .seedbox label { display: none; }
+  .seedbox input { width: 92px; }
+  .notes-btn { padding: 6px 10px; border-radius: 10px; }
+  .modes button { padding: 5px 12px; font-size: 15px; }
+  #toasts { top: auto; bottom: max(76px, calc(env(safe-area-inset-bottom, 0px) + 60px)); }
+  .toggles { display: flex; }
+  .brand small { display: none; }
+  .modes { margin-left: 0; }
+  .panel { top: auto; bottom: 0; max-height: 58vh; width: auto !important; left: 0 !important; right: 0 !important; border-radius: 16px 16px 0 0; display: none; padding-bottom: env(safe-area-inset-bottom, 0px); }
+  .panel.open { display: block; }
+  .help { display: none; }
+  #minimap { width: 120px; height: 120px; }
+  .counter { min-width: 120px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #banner.show { animation-duration: 0.01s; }
+  .toast { transition: none; }
+}
+</style>
+
+<div id="app">
+  <div id="stage"></div>
+  <header class="topbar">
+    <div class="brand"><span class="mark">LUMINA<i>·</i>학원도시</span><small>절차 생성 + 규칙 레벨 디자인</small></div>
+    <div class="seedbox">
+      <label for="seed">Seed</label>
+      <input id="seed" value="lumina" spellcheck="false" autocomplete="off" maxlength="40">
+      <select id="density" title="가로 밀도 (텐서장 유선 간격 배율)" aria-label="가로 밀도">
+        <option value="0.85">여유</option>
+        <option value="1" selected>보통</option>
+        <option value="1.2">촘촘</option>
+      </select>
+      <button class="btn primary" id="gen">생성</button>
+      <button class="btn" id="rand" title="무작위 시드">무작위</button>
+    </div>
+    <button class="btn notes-btn" id="open-notes">설계 노트</button>
+    <div class="toggles"><button class="btn small" id="toggle-left">레이어·규칙</button><button class="btn small" id="toggle-right">인스펙터·지표</button></div>
+    <div class="modes" role="group" aria-label="모드">
+      <button data-mode="map" aria-pressed="true">조감</button>
+      <button data-mode="explore" aria-pressed="false">탐험</button>
+    </div>
+  </header>
+
+  <aside class="panel left" id="left">
+    <section>
+      <h3>레이어</h3>
+      <div class="layers">
+        <label><input type="checkbox" id="ly-building" data-layer="building"><span class="sw" style="background:#f4a259"></span>건물</label>
+        <label><input type="checkbox" id="ly-prop" data-layer="prop"><span class="sw" style="background:#4f9d4a"></span>소품·나무</label>
+        <label><input type="checkbox" id="ly-landmark" data-layer="landmark"><span class="sw" style="background:#ff3d6e"></span>랜드마크</label>
+        <label><input type="checkbox" id="ly-rail" data-layer="rail"><span class="sw" style="background:#c3cad6"></span>모노레일</label>
+        <label><input type="checkbox" id="ly-gameplay" data-layer="gameplay"><span class="sw" style="background:#ffd400"></span>사다리·문</label>
+        <label><input type="checkbox" id="ly-secret" data-layer="secret"><span class="sw" style="background:#ffd23d"></span>비밀</label>
+        <label><input type="checkbox" id="ly-crumb" data-layer="crumb"><span class="sw" style="background:#62f0ff"></span>흔적·미끼</label>
+        <label><input type="checkbox" id="ly-pins" data-layer="pins"><span class="sw" style="background:#3dd6ff"></span>POI 핀</label>
+        <label><input type="checkbox" id="ly-routes" data-layer="routes"><span class="sw" style="background:#29e6ff"></span>의도 경로</label>
+        <label><input type="checkbox" id="ly-labels" data-layer="labels"><span class="sw" style="background:#1d2440"></span>라벨</label>
+      </div>
+    </section>
+    <section>
+      <h3>분석 오버레이 <small>의도의 근거</small></h3>
+      <div class="ovl">
+        <button data-overlay="none" aria-pressed="true">없음</button>
+        <button data-overlay="district" aria-pressed="false">구역</button>
+        <button data-overlay="flow" aria-pressed="false">보행 흐름</button>
+        <button data-overlay="hidden" aria-pressed="false">숨김도</button>
+        <button data-overlay="gap" aria-pressed="false">볼거리 공백</button>
+        <button data-overlay="detour" aria-pressed="false">동선 우회</button>
+      </div>
+      <div id="legend" data-kind="none">
+        <div class="lg-none">오버레이를 고르면 배치 규칙이 참조한 분석 필드를 지면 위에 겹쳐 봅니다.</div>
+        <div class="lg-district">구역(District) 경계 — 왜곡 가중 보로노이. 각 구역은 고유 가로 패턴·용도표·랜드마크를 가집니다.</div>
+        <div class="lg-flow">거점 쌍 최단경로 누적(근사 매개중심성). 상위 16%가 메인 동선입니다.<div class="ramp" style="background:linear-gradient(90deg,rgba(255,220,120,.4),#ff8c3c,#e6283c)"></div><div class="ends"><span>한산</span><span>붐빔</span></div></div>
+        <div class="lg-hidden">메인 동선 관찰자들의 아이소비스트에서 보이지 않는 정도. 노랑일수록 비밀 후보.<div class="ramp" style="background:linear-gradient(90deg,rgba(60,140,255,.2),#7a5adc,#be46c8,#ffd23c)"></div><div class="ends"><span>잘 보임</span><span>숨겨짐</span></div></div>
+        <div class="lg-gap">가장 가까운 볼거리까지 보행 거리. 메인 동선은 진하게 표시됩니다. 목표: 48m(달리기 8초) 이내.<div class="ramp" style="background:linear-gradient(90deg,#3cc878,#fadc46,#eb3c3c)"></div><div class="ends"><span>0m</span><span>48m</span><span>96m+</span></div></div>
+        <div class="lg-detour">메인 동선에서 벗어난 보행 거리 — 적당히 멀고 숨겨진 곳이 '찾는 재미'의 자리입니다.<div class="ramp" style="background:linear-gradient(90deg,rgba(70,170,255,.4),#966eff,#ff5ac8)"></div><div class="ends"><span>동선 위</span><span>120m+</span></div></div>
+      </div>
+    </section>
+    <section>
+      <h3>규칙 <small>클릭해 배치물 강조</small></h3>
+      <div id="rules"></div>
+    </section>
+  </aside>
+
+  <aside class="panel right" id="right">
+    <section id="inspector">
+      <h3>인스펙터</h3>
+      <div id="inspector-body"></div>
+    </section>
+    <section id="metrics">
+      <h3>레벨 지표</h3>
+      <div id="metrics-body"></div>
+    </section>
+    <section>
+      <h3>구역</h3>
+      <ul id="districts-body"></ul>
+    </section>
+    <section>
+      <h3>생성 로그</h3>
+      <ul id="logs-body"></ul>
+    </section>
+    <section>
+      <h3>내보내기</h3>
+      <button class="btn small" id="copy-json">엔진 임포트용 JSON 복사</button>
+      <p class="json-note">미터 · Y-up · 엔티티별 rule/why 포함. Unity/Unreal 임포터가 그대로 읽어 블록아웃을 재현할 수 있는 스키마입니다.</p>
+    </section>
+  </aside>
+
+  <div id="hl-banner" hidden><span></span><button id="hl-clear">해제</button></div>
+  <div class="help">좌드래그 이동 · 우드래그 회전 · 휠 확대 · 클릭 = 배치 근거 보기 · <b>M</b> 탐험</div>
+
+  <div id="hud" hidden>
+    <div id="compass"><div id="compass-marks"></div></div>
+    <div class="counters">
+      <div class="counter secret"><span>비밀</span><b id="count-secrets">0</b></div>
+      <div class="counter"><span>열쇠</span><b id="count-keys">0</b></div>
+      <div class="counter"><span>루트 코인</span><b id="count-coins">0</b></div>
+    </div>
+    <canvas id="minimap" width="180" height="180"></canvas>
+    <div id="prompt" hidden></div>
+    <div id="banner"></div>
+    <div class="exithint"><kbd>WASD</kbd> 이동 <kbd>Shift</kbd> 달리기 <kbd>Space</kbd> 점프·매달리기<br><kbd>E</kbd> 사다리/문 <kbd>V</kbd> 1인칭 <kbd>M</kbd> 지도로</div>
+    <div id="touch"><div id="touchpad"><div id="stick"></div></div><button class="tbtn" id="tjump">점프</button><button class="tbtn" id="tuse">E</button></div>
+  </div>
+
+  <div id="notes" hidden role="dialog" aria-modal="true" aria-labelledby="notes-title">
+    <div class="notes-card">
+      <header><h2 id="notes-title">설계 노트</h2><button class="btn small" id="close-notes">닫기</button></header>
+      <div class="notes-body">
+        <p class="lede">도시 골격은 <b>절차 생성</b>이 만들고, 플레이 경험은 생성된 공간을 <b>분석한 결과</b>를 근거로 <b>규칙</b>이 배치합니다. 그래서 모든 배치물에는 규칙과 근거(why)가 붙어 있고, 지형이 바뀌어도 의도 레이어가 다시 맞춰집니다.</p>
+        <h3>파이프라인</h3>
+        <ol class="pipeline" id="notes-pipeline"></ol>
+        <h3>세 가지 목표와 측정</h3>
+        <div class="goals">
+          <div><b>밀도</b><p>메인 동선(보행 흐름 상위 16%) 위 어디서든 <span class="mono">달리기 8초 = 48m</span> 안에 볼거리. 공백은 측지 거리장의 최원점부터 마이크로 POI로 메웁니다. 숫자는 플레이테스트로 보정할 파라미터입니다 (Witcher 3의 '40초 규칙'은 개발자 발언이고, '30–60초'는 출처 없는 통설).</p></div>
+          <div><b>의도</b><p>Lynch의 다섯 요소를 생성기 레이어로 만들었습니다. 길·경계·구역·결절점·랜드마크. 랜드마크는 도로 시선축이 가장 길게 끝나는 필지에 세웁니다 (비스타 종결 / Weenie). 교차로 표지판은 가장 가까운 랜드마크를 가리킵니다.</p></div>
+          <div><b>발견</b><p>메인 동선 관찰자들의 아이소비스트로 숨김도를 계산하고, 숨김도·위요도·우회거리가 높은 곳에 비밀을 둡니다 (BotW 삼각형 규칙의 도시판). 동선 이탈점에는 동선에서 보이는 미끼를 두고 흔적을 잇습니다 (호기심의 인력). 옥상 보상은 거리에서 보이게 둡니다 (보이지만 닿지 않음).</p></div>
+        </div>
+        <h3>규칙이 노리는 플레이</h3>
+        <ul class="plays">
+          <li><b>둘레형 필지 + 3.5m 통로</b> → 블록 안뜰은 숨은 공간이 되고, 통로는 자물쇠/열쇠의 최협점이 됩니다.</li>
+          <li><b>옥상 그래프</b> → 점프·매달리기 가능한 지붕을 묶고, 끊긴 곳에 판자, 가장 낮은 지붕 뒷면에 비상 사다리, BFS 최원점에 보상.</li>
+          <li><b>캠퍼스 문법</b> → 정문(중앙탑 방향) → 중정 → 본관 시계탑 축선, 구교사는 정문에서 가장 먼 곳, 담장 개구멍은 체육관/구교사 뒤.</li>
+          <li><b>막다른 길 규칙</b> → 보상 없는 막다른 길 0개 (강변 벤치, 골목 신사, 숨은 고양이).</li>
+          <li><b>경쟁 국경</b> → 라이벌 학원 경계 도로의 바리케이드·검문소, 자유학원에서 멀어질수록 낙서 확률 감소.</li>
+          <li><b>품질 다양성</b> → 지표가 적합도, 도로 연장 × 숨김 비율이 행동 축인 MAP-Elites로 성격이 다른 유효한 도시를 고릅니다 (<span class="mono">tools/seed-search.mjs</span>).</li>
+        </ul>
+        <h3>주요 근거</h3>
+        <ul class="refs">
+          <li>Chen et al., Interactive Procedural Street Modeling, SIGGRAPH 2008 — 텐서장 가로망</li>
+          <li>Vanegas et al., Procedural Generation of Parcels, EG 2012 — OBB 필지</li>
+          <li>Lynch, The Image of the City, 1960 — 다섯 요소</li>
+          <li>Benedikt, Isovists and Isovist Fields, 1979 · Hillier & Hanson, 1984 — 가시성/흐름</li>
+          <li>Fujibayashi & Yonezu, BotW 필드 레벨 디자인, CEDEC 2017 — 인력, 삼각형</li>
+          <li>Dormans, PCG Workshop 2010 / Unexplored 2017 — 미션 그래프, 사이클</li>
+          <li>van Muijden, GPU Procedural Placement in HZD, GDC 2017 — 결정론·국소 안정성</li>
+          <li>Mouret & Clune, MAP-Elites, 2015 · Togelius et al., Search-based PCG, 2011</li>
+          <li>Epic, UE 5.7/5.8 PCG 및 City Sample 2026 업데이트 — 엔진 이식 경로</li>
+        </ul>
+        <p class="muted">전체 리서치(66개 출처, 미확인 항목 표시)는 프로젝트의 docs/RESEARCH.md, 규칙 명세는 docs/DESIGN.md에 있습니다.</p>
+      </div>
+    </div>
+  </div>
+  <div id="toasts"></div>
+  <div id="loading" hidden>
+    <div class="loadcard">
+      <h2>도시를 짓는 중</h2>
+      <p>지형 → 가로망 → 필지 → 건물 → 분석 → 의도 배치</p>
+      <div class="loadtrack"><div id="loadbar"></div></div>
+      <ul id="stages"></ul>
+    </div>
+  </div>
+</div>
