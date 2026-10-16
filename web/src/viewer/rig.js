@@ -135,6 +135,12 @@ export class BustRig {
           mask: e.mask ? b64(e.mask) : null,
           // local -> bind (column-major), to bring deltas back into mesh space
           bindMatrix: e.bindMatrix,
+          // index ranges per material (MMD/VRM put body and clothes in one mesh)
+          groups: (e.mesh.geometry.groups ?? []).map((g) => {
+            const mats = Array.isArray(e.mesh.material) ? e.mesh.material : [e.mesh.material];
+            const m = mats[g.materialIndex ?? 0];
+            return { start: g.start, count: g.count, material: m?.name ?? String(g.materialIndex) };
+          }),
         };
       }),
     };
