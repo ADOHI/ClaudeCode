@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Bust field parameters",
+  "description": "Parameters of the bind-space bust deformation field (web/src/core/field.js DEFAULT_PARAMS; Python port tools/bustfield/field.py). All lengths are in S units (S = distance between the two upper-arm joints in bind space). Body frame: x = left (away from the midline on the left side), y = up, z = forward. Brush ops are in the side frame relative to the apex: x = outward (away from the midline, mirrored per side), y = up, z = forward. Each op of a target is applied to both sides (mirror symmetry by construction). Keys starting with '$' or '_' are reserved for metadata and ignored by the field.",
+  "type": "object",
+  "required": ["anchor", "depth", "window", "targets"],
+  "properties": {
+    "anchor": {
+      "description": "Base centre of each breast in the body frame relative to the chest origin: x = distance from the midline, y = up, z = forward. The apex is `depth` in front of it.",
+      "type": "object",
+      "required": ["x", "y", "z"],
+      "properties": {
+        "x": { "type": "number", "minimum": 0 },
+        "y": { "type": "number" },
+        "z": { "type": "number" }
+      },
+      "additionalProperties": false
+    },
+    "depth": {
+      "description": "Base centre -> apex distance along the body forward axis.",
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "window": {
+      "description": "Compact C2 window around each base centre (side-frame radii) with plateau fractions before the smootherstep falloff. The field is exactly zero outside it.",
+      "type": "object",
+      "required": ["x", "yUp", "yDown", "zFront", "zBack", "hardness", "hardnessZ"],
+      "properties": {
+        "x": { "type": "number", "exclusiveMinimum": 0 },
+        "yUp": { "type": "number", "exclusiveMinimum": 0 },
+        "yDown": { "type": "number", "exclusiveMinimum": 0 },
+        "zFront": { "type": "number", "exclusiveMinimum": 0 },
+        "zBack": { "type": "number", "exclusiveMinimum": 0 },
+        "hardness": { "type": "number", "minimum": 0, "exclusiveMaximum": 1 },
+        "hardnessZ": { "type": "number", "minimum": 0, "exclusiveMaximum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "midline": {
+      "description": "Half-width of the midline blend band (left/right partition of unity). Default 0.1.",
+      "type": "number",
+      "minimum": 0,
+      "default": 0.1
+    },
+    "midlineLock": {
+      "description": "Width of the band where lateral motion is scaled by t(2 - t), t = |x| / midlineLock (0 disables). Default 0.15.",
+      "type": "number",
+      "minimum": 0,
+      "default": 0.15
+    },
+    "kernel": {
+      "description": "Brush kernel: regularized Kelvinlets (tri-scale) or the non-physical smootherstep baseline.",
+      "enum": ["kelvinlet", "smooth"],
+      "default": "kelvinlet"
+    },
+    "targets": {
+      "description": "Blend shape name -> list of brush ops (summed, then windowed). Standard names: bust_size_up_natural, bust_size_up_stylized, bust_size_down, bust_lift_up, bust_lift_down, bust_spread_out, bust_spread_in.",
+      "type": "object",
+      "propertyNames": { "pattern": "^[A-Za-z0-9_.-]+$" },
+      "additionalProperties": {
+        "type": "array",
+        "items": { "$ref": "#/$defs/op" }
+      }
+    },
+    "mask": {
+      "description": "Skin-weight mask applied at bake time (deltas are multiplied by 1 - weight on excluded bones).",
+      "type": "object",
+      "properties": {
+        "excludeArms": { "type": "boolean" },
+        "excludeHead": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "patternProperties": {
+    "^[$_]": {}
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "vec3": {
+      "type": "array",
+      "items": { "type": "number" },
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "nu": {
+      "description": "Poisson ratio of the brush medium. Scale brushes vanish at 0.5 (an incompressible medium cannot dilate).",
+      "type": "number",
+      "minimum": 0,
+      "maximum": 0.5,
+      "default": 0.45
+    },
+    "op": {
+      "oneOf": [{ "$ref": "#/$defs/grab" }, { "$ref": "#/$defs/scale" }]
+    },
+    "grab": {
+      "description": "Grab brush: displacement `d` exactly at the centre `at`, decaying with radius `radius` (regularization eps).",
+      "type": "object",
+      "required": ["type", "at", "d", "radius"],
+      "properties": {
+        "type": { "const": "grab" },
+        "at": { "$ref": "#/$defs/vec3" },
+        "d": { "$ref": "#/$defs/vec3" },
+        "radius": { "type": "number", "exclusiveMinimum": 0 },
+        "nu": { "$ref": "#/$defs/nu" }
+      },
+      "additionalProperties": false
+    },
+    "scale": {
+      "description": "Scale (dilation) brush: u ~= k * r near the centre (k = 0.3 => +30% locally).",
+      "type": "object",
+      "required": ["type", "at", "radius"],
+      "properties": {
+        "type": { "const": "scale" },
+        "at": { "$ref": "#/$defs/vec3" },
+        "k": { "type": "number", "default": 0 },
+        "radius": { "type": "number", "exclusiveMinimum": 0 },
+        "nu": { "$ref": "#/$defs/nu" }
+      },
+      "additionalProperties": false
+    }
+  }
+}
