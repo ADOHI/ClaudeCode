@@ -48,7 +48,7 @@ MORPHO_DEFAULTS: dict[str, Any] = {
 }
 
 METRICS = [
-    ("upperPoleFrac", "UP:LP (upper %)", "%", True),
+    ("upperPoleFrac", "UP:LP upper share", "%", True),
     ("tiltDeg", "apex tilt", "deg", False),
     ("upperSlopeDeg", "upper pole slope", "deg", False),
     ("upperConvexity", "upper pole convexity", "", False),

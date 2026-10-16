@@ -1,12 +1,25 @@
 // Headless screenshots of the viewer for visual verification.
 //   node scripts/shoot.mjs [baseUrl] [outDir]
-// Expects `npm run dev` (or preview) to be serving the app.
+// Expects `npm run dev` (or preview) to be serving the app. SHOTS (JSON) can
+// override the shot list; each shot may set `sliders`, `view`, `heatmap`,
+// `gizmo`, `params`, `anim` (pose, e.g. {armDown: -65} = arms raised) and
+// `dyn` (e.g. {enabled: false} for deterministic shots).
+// For fixed-camera review sheets with metrics use scripts/contact-sheet.mjs.
+// Renders of licensed test characters (?model=...) must not be written into
+// the repo: pass an outDir outside it (web/shots/ is git-ignored, but keep
+// such renders out of the working tree altogether).
 import { chromium } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const base = process.argv[2] ?? 'http://localhost:5173/';
 const out = process.argv[3] ?? 'shots';
+if (/[?&]model=/.test(base) && !path.relative(REPO, path.resolve(out)).startsWith('..')) {
+  console.error(`refusing to write renders of ${base} inside the repo (${path.resolve(out)}); pass an outDir outside it`);
+  process.exit(1);
+}
 fs.mkdirSync(out, { recursive: true });
 
 const executablePath = process.env.CHROME_PATH ?? (fs.existsSync('/opt/pw-browsers/chromium-1194/chrome-linux/chrome') ? '/opt/pw-browsers/chromium-1194/chrome-linux/chrome' : undefined);
@@ -40,6 +53,8 @@ for (const s of shots) {
   await page.evaluate((s) => {
     const b = window.__bust;
     b.setSliders({ size: 0, style: 0.5, lift: 0, spread: 0, ...s.sliders });
+    if (s.anim) b.setAnim(s.anim);
+    if (s.dyn) b.setDyn(s.dyn);
     b.setHeatmap(!!s.heatmap);
     b.setGizmo(!!s.gizmo);
     if (s.params) b.setParams((p) => Object.assign(p, s.params));

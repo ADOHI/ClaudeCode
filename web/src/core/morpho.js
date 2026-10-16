@@ -117,7 +117,7 @@ export const MORPHO_DEFAULTS = {
 // Human-readable metric list (order = table order). `pct` metrics are
 // fractions shown in percent.
 export const METRICS = [
-  { key: 'upperPoleFrac', label: 'UP:LP (upper %)', unit: '%', pct: true },
+  { key: 'upperPoleFrac', label: 'UP:LP upper share', unit: '%', pct: true },
   { key: 'tiltDeg', label: 'apex tilt', unit: 'deg' },
   { key: 'upperSlopeDeg', label: 'upper pole slope', unit: 'deg' },
   { key: 'upperConvexity', label: 'upper pole convexity', unit: '' },
