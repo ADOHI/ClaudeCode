@@ -94,7 +94,32 @@ export function genTerrain(ctx) {
   ctx.terrain = terrain;
   ctx.bayAngle = bayAngle;
   computeWaterFields(ctx);
+  ctx.riverMouths = findRiverMouths(ctx);
   ctx.log('macro.island', `만 방위 ${(bayAngle * 180 / Math.PI).toFixed(0)}°, 하천 중심 이격 ${Math.abs(off).toFixed(0)}m`);
+}
+
+/**
+ * 하구(river mouth): 하천 폴리라인을 양 끝에서 안쪽으로 걸어 처음 만나는 RIVER 셀.
+ * 그 지점이 바다에서 14m 이내면 하구다. 순수 계산 (RNG 없음) — 항상 기록한다.
+ */
+export function findRiverMouths(ctx) {
+  const N = WORLD.size, H = WORLD.half;
+  const T = ctx.terrain.data, pts = ctx.river || [];
+  const mouths = [];
+  const cell = (p) => {
+    const i = Math.floor(p.x + H), j = Math.floor(p.z + H);
+    return i < 0 || j < 0 || i >= N || j >= N ? -1 : j * N + i;
+  };
+  for (const dir of [1, -1]) {
+    const start = dir > 0 ? 0 : pts.length - 1;
+    for (let k = start; k >= 0 && k < pts.length; k += dir) {
+      const id = cell(pts[k]);
+      if (id < 0 || T[id] !== TERRAIN.RIVER) continue;
+      if (ctx.distSea[id] < 14) mouths.push({ x: pts[k].x, z: pts[k].z });
+      break;
+    }
+  }
+  return mouths;
 }
 
 export function computeWaterFields(ctx) {

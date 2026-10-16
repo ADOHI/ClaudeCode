@@ -1,7 +1,8 @@
 // 매크로 2단계: 구역(District) 배치 — 포아송 시드, 로이드 완화, 제약 점수 최적화, 왜곡 보로노이.
 import { Noise2D } from './rng.js';
 import { Grid, edt, components, angleWrap } from './grid.js';
-import { TERRAIN, ZONE, WORLD, DISTRICT_TYPES, CITY_PROGRAM } from './config.js';
+import { TERRAIN, ZONE, WORLD, DISTRICT_TYPES, CITY_PROGRAM, PLAN } from './config.js';
+import { districtColorField } from './seams.js';
 
 const WADD = { center: -40, park: 18, harbor: 10, trad_academy: 22, tech_academy: 22, free_academy: 18, arts_academy: 22 };
 
@@ -71,6 +72,8 @@ export function genDistricts(ctx) {
 
   // 4) 유형 배정: 단항 선호 + 쌍대 제약 점수를 언덕오르기로 최대화
   const types = CITY_PROGRAM.slice(1); // center는 시드 0 고정
+  const planMode = !!(ctx.params && ctx.params.plan);
+  const mouths = ctx.riverMouths || [];
   const score = (assign) => {
     // assign[k] = seeds[k+1]의 유형
     let sc = 0;
@@ -93,7 +96,16 @@ export function genDistricts(ctx) {
     sc -= dist(pos.free_academy[0], pos.ruins[0]) / 300; // 무법 학원은 폐허 옆
     sc -= Math.abs(dist(pos.free_academy[0], pos.trad_academy[0]) - 280) / 220; // 라이벌은 국경을 맞댄다
     sc += 0.5 * Math.min(dist(pos.commercial[0], pos.commercial[1]), 400) / 400;
-    for (const r of pos.residential) sc -= (0.4 * Math.min(...acad.map((a) => dist(a, r)))) / 400;
+    if (planMode) {
+      // 관계 기반 배치 (C§6 A1): 학원마다 기숙사촌, 항만↔상점가 물류, 옛 포구 옆 구시가지, 하구의 항만
+      const P = PLAN.placement, H0 = pos.harbor[0];
+      for (const a of acad) sc -= (P.dormTown * Math.min(...pos.residential.map((r) => dist(a, r)))) / 400;
+      sc -= (P.supply * Math.min(...pos.commercial.map((c) => dist(H0, c)))) / 400;
+      sc -= (P.oldPort * Math.max(0, dist(pos.ruins[0], H0) - P.oldPortSlack)) / 350;
+      if (mouths.length) sc -= Math.max(0, Math.min(...mouths.map((m) => dist(H0, m))) - P.harborMouthSlack) / P.harborMouthDiv;
+    } else {
+      for (const r of pos.residential) sc -= (0.4 * Math.min(...acad.map((a) => dist(a, r)))) / 400;
+    }
     return sc;
   };
   let assign = rng.shuffle(types.slice());
@@ -142,7 +154,34 @@ export function genDistricts(ctx) {
   const dgrid = new Grid(N, N, 1, -H, -H, Uint8Array);
   const D = dgrid.data;
   const wadd = districts.map((d) => WADD[d.type] || 0);
-  for (let j = 0; j < N; j++) {
+  if (planMode) {
+    // 계획 모드: 두 번째로 가까운 구역(district2)과 경계 여유(seamMargin = bd2 - bd1)도 기록 → 이음매 띠
+    const d2grid = new Grid(N, N, 1, -H, -H, Uint8Array);
+    const D2 = d2grid.data;
+    const margin = new Uint8Array(N * N);
+    const nd = districts.length;
+    const sx = new Float64Array(nd), sz = new Float64Array(nd), sw = new Float64Array(nd);
+    for (let s = 0; s < nd; s++) { sx[s] = districts[s].x; sz[s] = districts[s].z; sw[s] = wadd[s]; }
+    for (let j = 0; j < N; j++) {
+      for (let i = 0; i < N; i++) {
+        const id = j * N + i;
+        if (T[id] === TERRAIN.SEA) { D[id] = 255; D2[id] = 255; margin[id] = 255; continue; }
+        const x0 = dgrid.cx(i), z0 = dgrid.cz(j);
+        const x = x0 + warpX.bilinear(x0, z0), z = z0 + warpZ.bilinear(x0, z0);
+        let best = 0, bd = Infinity, best2 = 0, bd2 = Infinity;
+        for (let s = 0; s < nd; s++) {
+          const d = Math.hypot(sx[s] - x, sz[s] - z) - sw[s];
+          if (d < bd) { bd2 = bd; best2 = best; bd = d; best = s; } else if (d < bd2) { bd2 = d; best2 = s; }
+        }
+        D[id] = best;
+        D2[id] = best2;
+        margin[id] = Math.min(255, Math.round(bd2 - bd));
+        districts[best].area++;
+      }
+    }
+    ctx.district2 = d2grid;
+    ctx.seamMargin = margin;
+  } else for (let j = 0; j < N; j++) {
     for (let i = 0; i < N; i++) {
       const id = j * N + i;
       if (T[id] === TERRAIN.SEA) { D[id] = 255; continue; }
@@ -174,6 +213,40 @@ export function genDistricts(ctx) {
 
   genZones(ctx);
   ctx.log('macro.district', `시드 ${seeds.length}개, 배정 점수 ${cur.toFixed(2)}`);
+  if (planMode) {
+    districtColorField(ctx);
+    logPlacement(ctx);
+  }
+}
+
+/** 관계 기반 배치가 만족한 이유를 기록 (macro.relation) */
+export function placementStats(ctx) {
+  const ds = ctx.districts;
+  const of = (t) => ds.filter((d) => d.type === t);
+  const dist = (p, q) => Math.hypot(p.x - q.x, p.z - q.z);
+  const harbor = of('harbor')[0], ruins = of('ruins')[0];
+  const res = of('residential'), com = of('commercial');
+  const mouths = ctx.riverMouths || [];
+  const acadResDist = {};
+  for (const d of ds) if (d.def.campus) acadResDist[d.type] = res.length ? Math.round(Math.min(...res.map((r) => dist(d, r)))) : null;
+  const vals = Object.values(acadResDist).filter((v) => v !== null);
+  return {
+    harborMouth: harbor && mouths.length ? Math.round(Math.min(...mouths.map((m) => dist(harbor, m)))) : null,
+    dormTownMax: vals.length ? Math.max(...vals) : null,
+    acadResDist,
+    ruinsHarbor: harbor && ruins ? Math.round(dist(harbor, ruins)) : null,
+    harborCom: harbor && com.length ? Math.round(Math.min(...com.map((c) => dist(harbor, c)))) : null,
+  };
+}
+
+function logPlacement(ctx) {
+  const st = placementStats(ctx);
+  const parts = [];
+  if (st.harborMouth !== null) parts.push(`항만은 하구 옆 ${st.harborMouth}m`);
+  if (st.dormTownMax !== null) parts.push(`주거구는 학원 사이(최대 ${st.dormTownMax}m)`);
+  if (st.ruinsHarbor !== null) parts.push(`구시가지는 항만 옆 ${st.ruinsHarbor}m`);
+  if (st.harborCom !== null) parts.push(`항만→상점가 물류 ${st.harborCom}m`);
+  ctx.log('macro.relation', parts.join(' · '));
 }
 
 function genZones(ctx) {

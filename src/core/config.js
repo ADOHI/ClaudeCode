@@ -12,7 +12,7 @@ export const WORLD = {
 export const TERRAIN = { SEA: 0, LAND: 1, RIVER: 2, LAKE: 3 };
 export const ROAD = {
   NONE: 0, MAIN: 1, MINOR: 2, ALLEY: 3, COAST: 4, SIDEWALK: 5, PLAZA: 6,
-  CAMPUS_PATH: 7, PARK_PATH: 8, BRIDGE: 9, PIER: 10,
+  CAMPUS_PATH: 7, PARK_PATH: 8, BRIDGE: 9, PIER: 10, OLD: 11,
 };
 export const ZONE = { CITY: 0, CAMPUS: 1, PARK: 2, PLAZA: 3 };
 
@@ -22,6 +22,7 @@ export const ROAD_LEVELS = {
   2: { name: '생활가로', width: 8, sidewalk: 2, type: ROAD.MINOR },
   3: { name: '골목', width: 4, sidewalk: 0, type: ROAD.ALLEY },
   4: { name: '해안도로', width: 10, sidewalk: 3, type: ROAD.COAST },
+  5: { name: '옛길', width: 6, sidewalk: 1.5, type: ROAD.OLD },
 };
 
 // ---- 구역 원형 (Lynch: Districts) ----
@@ -124,7 +125,7 @@ export const RULES = {
   'meso.deadend': { layer: 'meso', name: '막다른 골목', desc: '재개발구역은 일부 골목을 블록 중간에서 끊어 포켓 공간 생성' },
   'meso.lot': { layer: 'meso', name: 'OBB 필지 분할', desc: '블록을 가로 방향 OBB로 재귀 분할, 접도(frontage) 판정' },
   'meso.zoning': { layer: 'meso', name: '용도 배정', desc: '구역·코너·접도 위계·흐름량에 따른 건물 프로그램 가중 선택' },
-  'meso.skyline': { layer: 'meso', name: '스카이라인 경사', desc: '중앙탑으로 갈수록 높아지는 높이 경사 — 실루엣만으로 방향을 안다' },
+  'meso.skyline': { layer: 'meso', name: '스카이라인 경사', desc: '스파이어 + 역세권 봉우리 높이장' },
   'meso.campus': { layer: 'meso', name: '학원 캠퍼스 문법', desc: '정문→전정→중정(Quad)→본관(시계탑) 축선, 측면 교사동, 후면 체육관/운동장/구교사' },
   'meso.wall': { layer: 'meso', name: '캠퍼스 담장', desc: '캠퍼스는 담장으로 닫고 정문/후문/개구멍만 열어 출입을 의도적으로 제한' },
   'meso.park': { layer: 'meso', name: '공원 경로망', desc: '입구들과 명소를 MST + 순환 간선으로 연결 (막힘 없는 산책 루프)' },
@@ -133,7 +134,7 @@ export const RULES = {
   'meso.construction': { layer: 'meso', name: '공사장', desc: '재개발구역 필지 일부를 펜스로 둘러친 공사장으로 — 틈새 하나는 열어둔다' },
   'intent.landmark': { layer: 'intent', name: '랜드마크 비스타', desc: '도로 시선축 길이 합이 최대인 필지에 구역 랜드마크 (비스타 종결점 / Weenie)' },
   'intent.spire': { layer: 'intent', name: '중앙탑', desc: '어디서든 보이는 전역 랜드마크. 모든 방사 대로의 소실점' },
-  'intent.flow': { layer: 'intent', name: '보행 흐름', desc: '주요 거점 쌍 최단경로 누적(근사 매개중심성) → 메인 동선' },
+  'intent.flow': { layer: 'intent', name: '보행 흐름', desc: '관계 OD(통학·방과후·물류·산책) + 거점 쌍 경로' },
   'intent.anchor': { layer: 'intent', name: '앵커 POI', desc: '흐름 상위 필지에 핵심 활동(게임센터, 카페 등) 배정' },
   'intent.rhythm': { layer: 'intent', name: '밀도 리듬', desc: '메인 동선 위 어느 지점에서도 일정 거리 안에 볼거리 — 공백을 찾아 마이크로 POI 삽입' },
   'intent.secret': { layer: 'intent', name: '숨김 보상', desc: '동선 가시성(아이소비스트) 낮고, 접근 가능하며, 적당히 우회해야 하는 지점에 비밀 배치' },
@@ -161,6 +162,39 @@ export const RULES = {
   'micro.laundry': { layer: 'micro', name: '빨래줄', desc: '주거구 골목 양쪽 건물 사이' },
   'micro.cat': { layer: 'micro', name: '동네 고양이', desc: '조용한 골목/공원 — 살아있는 도시 신호' },
   'micro.crosswalk': { layer: 'micro', name: '횡단보도', desc: '간선 교차로 접근부' },
+  // ---- 도시 골격 (cohesion) ----
+  'macro.plan': { layer: 'macro', name: '도시 골격 계획', desc: '환상대로·방사대로·역·광장·옛길을 먼저 깔고, 용도·높이·거리 성격이 모두 이 골격을 읽는다' },
+  'macro.ring': { layer: 'macro', name: '학원 환상대로', desc: '네 학원 정문 앞을 꿰는 순환 대로 — 중앙분리대 위로 모노레일' },
+  'macro.radial': { layer: 'macro', name: '방사 대로 · 축선 종결', desc: '스파이어에서 출발해 정문·구역 코어·공원 입구에서 끝나는 목적지 대로' },
+  'macro.oldroad': { layer: 'macro', name: '옛길(연대기)', desc: '하구 어촌에서 강 단구를 따라 옛 나루까지 — 섬에서 가장 오래된 길과 참배길' },
+  'macro.relation': { layer: 'macro', name: '구역 관계 그래프', desc: '통학·방과후·물류·옛길·산책·국경·대로 관계가 배치의 이유가 된다' },
+  'meso.station': { layer: 'meso', name: '역세권 · 역전 광장', desc: '역 앞 광장·버스 터미널·역 빌딩 — 역에 가까울수록 높고 붐빈다' },
+  'meso.street': { layer: 'meso', name: '이름 있는 거리', desc: '통학로·상점가·어시장 거리·벚꽃 산책길 — 길마다 건축선·차양·배너·아치' },
+  'meso.seam': { layer: 'meso', name: '이음매(경계 띠)', desc: '두 구역 사이 띠에는 둘을 잇는 용도(학원가·하숙촌·어시장 골목)가 선다' },
+  'meso.threshold': { layer: 'meso', name: '문턱(구역 진입)', desc: '구역 진입점: 압축된 길 → 관문 → 쉼터 광장' },
+  'meso.heritage': { layer: 'meso', name: '옛길 필지', desc: '옛길 변은 좁고 깊은 필지, 기와 박공의 노포' },
+  'meso.promenade': { layer: 'meso', name: '수변 산책로', desc: '하천 8m 띠는 산책로 — 카페와 벤치가 강을 향한다' },
+  'meso.axis': { layer: 'meso', name: '축선 종결 · 조망 보호', desc: '직선 가로 끝에 랜드마크, 시선축을 가리는 건물은 낮춘다' },
+  'micro.banner': { layer: 'micro', name: '거리 배너', desc: '가로등 배너 색이 지금 걷는 거리와 세력을 알려준다' },
+  'micro.territory': { layer: 'micro', name: '학원 세력권', desc: '정문에서 도로를 따라 번지는 학원 세력: 수종·공고문·최전선' },
+  'intent.chain': { layer: 'intent', name: '구역 간 열쇠 사슬', desc: '열쇠는 관계가 있는 이웃 구역의 거리 위에 — 관계를 따라 걷게 한다' },
+  // ---- 건축 문법 (architecture) ----
+  'arch.style': { layer: 'arch', name: '양식 어휘', desc: '구역마다 300m 밖에서도 읽히는 지붕 실루엣 가족 하나' },
+  'arch.dialect': { layer: 'arch', name: '방언', desc: '같은 유형 구역 둘은 맥락으로 갈린다 (중심 가까움=네온, 물가=테라스)' },
+  'arch.field': { layer: 'arch', name: '세력 양식장', desc: '학원 정문에서 도로망을 따라 양식이 번진다 — 진입대로가 세력의 거리' },
+  'arch.block': { layer: 'arch', name: '블록 유전자', desc: '블록은 한 가족, 필지는 한 층만 변이' },
+  'arch.borrow': { layer: 'arch', name: '경계 차용', desc: '소프트 경계에서 색→창→지붕→몸체 순으로 차용. 간선·하천 경계는 차용 없음' },
+  'arch.grammar': { layer: 'arch', name: '구성 문법', desc: '발자국·층군 연산·왕관·부착물' },
+  'arch.tier': { layer: 'arch', name: '위계·예산', desc: '랜드마크 › 시그니처 › 악센트 › 바탕' },
+  'arch.corner': { layer: 'arch', name: '모서리 경첩', desc: '간선 교차점마다 표지 건물' },
+  'arch.terminus': { layer: 'arch', name: '비스타 종결', desc: '직선가로 끝은 탑 파사드로 닫는다' },
+  'arch.rival': { layer: 'arch', name: '대치 요새화', desc: '라이벌 경계는 섞이지 않고 흉벽과 깃발' },
+  'arch.frame': { layer: 'arch', name: '시그니처 무대', desc: '주변은 시그니처보다 2층 낮게' },
+  'arch.arcade': { layer: 'arch', name: '가로 회랑', desc: '블록면 전체에 이어지는 아치 회랑' },
+  'arch.signature': { layer: 'arch', name: '시그니처 건축', desc: '구조적 이유가 있는 자리에만 서는 판타지 건물' },
+  'arch.gateway': { layer: 'arch', name: '경계 관문', desc: '우호 경계를 넘는 간선의 문, 좌우 기둥은 각자의 양식' },
+  'arch.skybridge': { layer: 'arch', name: '구름다리', desc: '같은 양식 건물을 잇는 옥상 높이 다리 (옥상 루트 간선)' },
+  'micro.canopy': { layer: 'micro', name: '골목 캐노피', desc: '골목 머리 위 양식별 등롱줄·빛 배관 (빨래줄 일반화)' },
 };
 
 // 마이크로 POI (리듬 채우기) 후보 — 구역별
@@ -185,4 +219,72 @@ export const SECRET_TYPES = {
   stash: { name: '밀수품 상자', color: '#ffb04d', crumb: '끌린 자국' },
   treasure: { name: '보물 상자', color: '#ffe066', crumb: '반짝임' },
   view: { name: '비경', color: '#ffffff', crumb: '바람개비' },
+};
+
+// ==== 도시 골격 계획 (cohesion track, C§4) ====
+// 골격 계획 손잡이: 환상대로·방사대로·역·광장·가로망·이음매·문턱·OD 흐름.
+export const PLAN = {
+  ring: { rMin: 205, rMax: 270, rAdd: 12, gateJunction: 36, sigmaDeg: 25, devScale: 40, devW: 2.5, devCap: 6,
+    maxGapDeg: 70, snapRange: 110, windowDeg: 20, legMaxRatio: 2.0, width: 18, sidewalk: 4, median: 4,
+    plazaR: 70, innerSoftR: 150, innerSoftMul: 3, riverCost: 5, seaMargin: 20 },
+  radials: { max: 7, mergeDeg: 22, mouthGapDeg: 34, mouthR: 64, maxRiverCross: 50, spurMedian: 3 },
+  stations: { max: 7, hardMax: 8, minArc: 170, gateArcPick: 150, gateArcOk: [110, 260], nearGatePenaltyArc: 90 },
+  squares: { stationFront: 20, stationBack: 11, gate: 10, gateOffset: 11, core: 12 },
+  roads: { dsepMain: 150, maxMainLines: 30, spineSeedStep: 120, coreSeedMinSpine: 90 },
+  tensor: { spineW: 1.8, spineL: 45, oldW: 1.3, oldL: 22, oldMinR: 120 },
+  seam: { band: 64, coreT: 0.6, pSeam: 0.85, pLeak: 0.35, floorBlend: 0.5, colorBlend: 0.2 },
+  height: { ratioCap: 2.5, pairR: 25, iters: 3, axisCapMax: 3, axisMinFloors: 2 },
+  streets: { max: 10, perStation: 2, minLen: 90, maxMainFrac: 0.5, jaccard: 0.5, walkMax: 520, maskR: 10 },
+  thresholds: { persist: 15, merge: 60, perPair: 2, max: 24, compress: 35, release: [10, 45], skipNearSquare: 40 },
+  promenade: { river: 8 },
+  od: { scale: 12, genericW: 0.5, maxDist: 1400 },
+  placement: { dormTown: 0.8, supply: 0.3, oldPort: 0.6, oldPortSlack: 150, harborMouthSlack: 120, harborMouthDiv: 200 },
+};
+
+export const SHORT = { center: '중앙', commercial: '상점가', residential: '주거구', trad_academy: '루미에르', tech_academy: '아르케',
+  free_academy: '레드라인', arts_academy: '스텔라', harbor: '청해항', ruins: '구시가지', park: '미라이 공원' };
+
+export const RELATION_KINDS = {
+  commute: { name: '통학', color: '#5b6cff', purpose: 'school' },
+  afterschool: { name: '방과후', color: '#ff5fa2', purpose: 'shop' },
+  supply: { name: '물류', color: '#2f7fbf', purpose: 'market' },
+  heritage: { name: '옛길', color: '#a0784a', purpose: 'leisure' },
+  leisure: { name: '산책', color: '#3f9a4a', purpose: 'leisure' },
+  rivalry: { name: '국경', color: '#e0413b', purpose: 'through' },
+  civic: { name: '대로', color: '#8890a0', purpose: 'leisure' },
+};
+export const ACADEMY_TYPES = ['trad_academy', 'tech_academy', 'free_academy', 'arts_academy'];
+export const RELATION_RULES = [
+  { from: 'residential', to: ACADEMY_TYPES, kind: 'commute', pick: 2, w: 3 },
+  { from: ACADEMY_TYPES, to: ['commercial'], kind: 'afterschool', pick: 1, w: 2 },
+  { from: 'harbor', to: ['commercial', 'center'], kind: 'supply', pick: 1, w: 1.5 },
+  { from: 'ruins', to: ['harbor'], kind: 'heritage', pick: 1, w: 1 },
+  { from: 'park', to: ['arts_academy', 'residential', 'trad_academy'], kind: 'leisure', pick: 2, w: 1 },
+  // RIVALS → rivalry (w 0.8); every radial → civic(center, dest district) (w 1);
+  // Kruskal over adjacent pairs (border > 80 cells at stride 2) adds civic edges until the graph is connected. Cap 24 edges.
+];
+export const RELATION_STORY = {
+  commute: '{A} 학생들이 매일 {B}로 등교', afterschool: '{A} 방과후 → {B}', supply: '{A}의 물자가 {B}로',
+  heritage: '{A}는 {B}의 옛 포구에서 시작', leisure: '{A} 사람들의 산책 → {B}', rivalry: '{A} vs {B} — 국경', civic: '{B} → 스파이어 대로',
+};
+
+export const STREET_CHAR = { // buildTo = front setback range (m); grain = frontage range (m)
+  ring: { buildTo: [2, 3.5], faceVar: 1, trees: 'double', lamp: 'twin' },
+  radial: { buildTo: [1.5, 3], faceVar: 1, trees: 'row', lamp: 'twin' },
+  shotengai: { buildTo: [0, 0.4], faceVar: 1, awning: 'continuous', grain: [7, 11], banner: true, arch: true, covered: 80 },
+  gakuen: { buildTo: [0.3, 1.2], faceVar: 1, awning: 'continuous', grain: [8, 13], banner: true, arch: true, sakura: 10, poster: true },
+  market: { buildTo: [0, 0.5], faceVar: 1, awning: 'continuous', grain: [8, 12], banner: true, arch: true },
+  promenade: { buildTo: [3, 5], awning: 'cafe', sakura: 10, bench: 24 },
+  old: { buildTo: [0, 0.6], grain: [6, 10], depth: [12, 18], lantern: 18 },
+};
+export const SCHOOL_ROAD_NAMES = { trad_academy: '루미에르 언덕길', tech_academy: '아르케 테크로드', free_academy: '레드라인 골목길', arts_academy: '스텔라 오선지 거리' };
+export const PURPOSE_COLORS = { commute: '#20a8a0', school: '#5b6cff', shop: '#ff8a3d', leisure: '#3f9a4a', market: '#2f7fbf' };
+
+// 학원 세력: 양식 키, 도로 측지 감쇠 길이 L(m), 가로수 수종 색 (free_academy: 나무 대신 자전거 거치대)
+// (SPECIES · ACADEMY_LAMBDA를 대체한다 — plan §1 D3)
+export const FACTIONS = {
+  trad_academy: { style: 'lumiere', L: 150, species: '#f7a8c8' },
+  tech_academy: { style: 'arche', L: 140, species: '#e8c547' },
+  free_academy: { style: 'redline', L: 180, species: null },
+  arts_academy: { style: 'stella', L: 150, species: '#b48fd8' },
 };
