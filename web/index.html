@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bust Morph Lab</title>
+    <style>
+      :root { color-scheme: dark; }
+      html, body { margin: 0; height: 100%; background: #1b1d22; color: #d8dae0; font: 12px/1.45 system-ui, sans-serif; overflow: hidden; }
+      #app { position: fixed; inset: 0; }
+      #hud { position: fixed; left: 10px; top: 10px; max-width: 460px; max-height: calc(100% - 20px); overflow: auto; background: rgba(20, 22, 27, 0.82); border: 1px solid #333842; border-radius: 6px; padding: 8px 10px; white-space: pre-wrap; font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+      #hud.hidden { display: none; }
+      #drop { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(40, 120, 255, 0.15); border: 3px dashed #4a8cff; font-size: 20px; pointer-events: none; }
+      #drop.on { display: flex; }
+      #status { position: fixed; right: 10px; bottom: 10px; opacity: 0.7; }
+      .ok { color: #7ddc8a; } .bad { color: #ff7a7a; } .warn { color: #f2c46d; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="hud"></div>
+    <div id="drop">VRM / GLB / FBX 파일을 놓으세요</div>
+    <div id="status"></div>
+    <script type="module" src="/src/viewer/main.js"></script>
+  </body>
+</html>
