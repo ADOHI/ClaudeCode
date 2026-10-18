@@ -17,7 +17,8 @@ const MMD_SCALE = 0.08;
  */
 export async function loadModel(source, { keepMorphs = false } = {}) {
   if (source?.entries) return loadMMDEntries(source, { keepMorphs });
-  const name = typeof source === 'string' ? source.split('/').pop() : source.name;
+  let name = typeof source === 'string' ? source.split('/').pop() : source.name;
+  if (typeof source === 'string') { try { name = decodeURIComponent(name); } catch { /* keep malformed URL label */ } }
   const ext = name.split('.').pop().toLowerCase();
   const url = typeof source === 'string' ? source : URL.createObjectURL(source);
   let root, vrm = null;

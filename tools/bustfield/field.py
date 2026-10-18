@@ -125,6 +125,19 @@ def falloff(t, hard):
     return np.where(t <= hard, 1.0, np.where(t >= 1, 0.0, v))
 
 
+def linear_brush(r, A, eps=0):
+    """Row-major affine strain/rotation brush, matching field.js linearBrush."""
+    r = np.asarray(r, dtype=float)
+    A = np.asarray(A, dtype=float).reshape(3, 3)
+    # Keep the summation order identical to JS, including on rotated frames.
+    v = np.stack([A[i, 0] * r[..., 0] + A[i, 1] * r[..., 1] + A[i, 2] * r[..., 2]
+                  for i in range(3)], axis=-1)
+    if eps > 0:
+        w = falloff(np.linalg.norm(r, axis=-1) / eps, 0)
+        v = v * w[..., None]
+    return v
+
+
 class Side:
     def __init__(self, s, x_axis, base, apex):
         self.s = s
@@ -184,8 +197,10 @@ class BustField:
             "at": [at[0] * S, at[1] * S, at[2] * S + self.depth],
             "d": [v * S for v in d] if d else None,
             "k": _nn(op.get("k"), 0),
-            "eps": op["radius"] * S,
+            "eps": _nn(op.get("radius"), 0) * S,
             "nu": _nn(op.get("nu"), 0.45),
+            "A": op.get("A"),
+            "parity": _nn(op.get("parity"), 1),
         }
 
     # --- geometry --------------------------------------------------------------
@@ -263,7 +278,7 @@ class BustField:
         return np.stack([D[..., i] + L[i] * dl for i in range(3)], axis=-1)
 
     # --- brushes ------------------------------------------------------------------
-    def brushes(self, name, Q):
+    def brushes(self, name, Q, s=1):
         """Unwindowed brush sum in the side frame."""
         if name not in self._ops:
             raise KeyError(f"unknown target {name}")
@@ -280,9 +295,11 @@ class BustField:
                     if self.physical
                     else kv.scale_smooth(r, op["k"], op["eps"])
                 )
+            elif op["type"] == "linear":
+                v = linear_brush(r, op["A"], op["eps"])
             else:
                 raise ValueError(f"unknown brush {op['type']}")
-            u = u + v
+            u = u - v if op["parity"] < 0 and s < 0 else u + v
         return u
 
     def delta(self, name, P):
@@ -298,7 +315,7 @@ class BustField:
             if not nz.any():
                 continue
             # Brushes only where the window is non-zero (JS skips the rest).
-            v = self.from_side_vec(side, self.brushes(name, Q[nz]))
+            v = self.from_side_vec(side, self.brushes(name, Q[nz], side.s))
             out[nz] = out[nz] + v * w[nz][:, None]
         out = self.lock_lateral(P2, out)
         return out[0] if single else out
@@ -369,6 +386,7 @@ __all__ = [
     "clone_params",
     "create_bust_field",
     "falloff",
+    "linear_brush",
     "from_body",
     "params_with_targets",
     "slider_to_weights",

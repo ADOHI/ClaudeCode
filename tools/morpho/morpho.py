@@ -111,13 +111,15 @@ def nan(v) -> bool:
 
 
 def score_bands(m: dict, band: dict, reference: dict | None = None) -> dict:
+    if (m or {}).get("ok") is False:
+        return {"distance": None, "inside": False, "per": {}, "missing": list(band["metrics"])}
     acc = sw = 0.0
     inside = True
     per, missing = {}, []
     for k, b in band["metrics"].items():
         v = (m or {}).get(k)
         if k == "imfRise":
-            v = m["imfY"] - reference["imfY"] if reference and is_num((m or {}).get("imfY")) and is_num(reference.get("imfY")) else None
+            v = m["imfY"] - reference["imfY"] if reference and reference.get("ok") is not False and is_num((m or {}).get("imfY")) and is_num(reference.get("imfY")) else None
         if not is_num(v):
             missing.append(k)
             continue

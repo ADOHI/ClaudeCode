@@ -6,7 +6,7 @@ from helpers import random_params
 
 from bustfield import kelvinlet as kv
 from bustfield.distill import Dictionary, design, jacobian_columns
-from bustfield.field import DEFAULT_PARAMS, BustField, clone_params, from_body, params_with_targets, to_body
+from bustfield.field import DEFAULT_PARAMS, BustField, clone_params, from_body, linear_brush, params_with_targets, to_body
 from bustfield.validate import extreme_combos, field_check
 
 
@@ -22,6 +22,16 @@ def divergence(fn, p, h=1e-4):
 
 def test_grab_hits_displacement_at_centre():
     assert np.allclose(kv.grab(np.zeros(3), [0.1, -0.2, 0.3], 0.5, 0.45), [0.1, -0.2, 0.3], atol=1e-12)
+
+
+def test_linear_brush_has_expected_strain_and_compact_support():
+    A = np.array([[0.1, 0.2, 0], [-0.3, 0, 0.4], [0.2, -0.1, 0]])
+    P = np.array([[0.1, -0.2, 0.3], [0.3, 0, 0]])
+    assert np.allclose(linear_brush(P, A.ravel()), P @ A.T)
+    assert np.array_equal(linear_brush(P, A.ravel(), eps=0.2), np.zeros_like(P))
+    h = 1e-7
+    J = np.stack([linear_brush(np.eye(3)[i] * h, A.ravel(), eps=0.2) / h for i in range(3)], axis=1)
+    assert np.allclose(J, A, atol=1e-12)
 
 
 def test_grab_divergence_free_at_half():

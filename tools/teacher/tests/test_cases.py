@@ -35,6 +35,18 @@ def test_load_config_layers(tmp_path):
     assert DEFAULT_CONFIG['volume']['skinMaterials'] is None  # defaults untouched
 
 
+@pytest.mark.parametrize('inverse_ok,modes_ok,code', [(True, True, 0), (False, True, 1), (True, False, 1)])
+def test_bake_cli_rejects_failed_inverse_or_unstable_modes(monkeypatch, inverse_ok, modes_ok, code):
+    import importlib
+    module = importlib.import_module('tools.teacher.bake')
+    monkeypatch.setattr(module.BindExport, 'load', lambda path: object())
+    monkeypatch.setattr(module, 'bake', lambda *a, **kw: {
+        'cases': {'bust_lift_up': {'tets_det_le_0': 0, 'converged': True}},
+        'inverse': {'converged': inverse_ok}, 'modes': {'stable': modes_ok},
+    })
+    assert module.main(['--bind', 'synthetic.json', '--out', 'unused']) == code
+
+
 class _Vol:
     growth_w = np.array([0.0, 0.5, 1.0])
 

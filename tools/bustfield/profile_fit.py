@@ -25,7 +25,7 @@ import sys
 
 import numpy as np
 
-from .distill import Dictionary, design, enforce_gate, jacobian_gram, regularizer
+from .distill import Dictionary, design, enforce_gate, gate_check, jacobian_gram, regularizer
 from .field import BustField, from_body, to_body
 from .solve import solve_spd
 from .validate import grid_points
@@ -292,7 +292,11 @@ def fit_profile(
         if step < 1e-7:
             break
     coef, params, qp, worst, fixed = enforce_gate(frame, base_params, dic, [target_name], H, {target_name: g}, {target_name: c}, gate, tau, gate_res, verbose=verbose)
-    info = {"gauss_newton": hist, "qp": qp, "minDet": min(worst, fixed), "minDet_movable": worst, "minDet_fixed_targets_only": fixed}
+    # Check the emitted, rounded operations in float64, not only the SQP's
+    # cached float32 screening values.
+    actual_min, per_res = gate_check(frame, params, gate_res)
+    info = {"gauss_newton": hist, "qp": qp, "minDet": actual_min, "per_res": per_res,
+            "minDet_movable": worst, "minDet_fixed_targets_only": fixed}
     return params, coef[target_name], info
 
 
@@ -352,7 +356,7 @@ def main(argv=None):
     if "frontal" in e:
         f = e["frontal"]
         print(f"  frontal silhouette: rest->target rms {f['before_rms']:.4f} S, fitted rms {f['after_rms']:.4f} S, max {f['after_max']:.4f} S")
-    return 0
+    return 0 if rep['gate']['passed'] else 1
 
 
 def _mesh(bind, layers):
@@ -441,6 +445,8 @@ def run(frame, base, bind, a):
             "minDet": info["minDet"],
             "minDet_movable": info["minDet_movable"],
             "minDet_fixed_targets_only": info["minDet_fixed_targets_only"],
+            "passed": bool(info["minDet"] > 0.2),
+            "per_res": info["per_res"],
         },
         "fit": info,
         "atoms_per_side": len(params["targets"][a.target]),

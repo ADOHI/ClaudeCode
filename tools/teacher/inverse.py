@@ -26,6 +26,8 @@ def inverse_rest(model, X_target, loads, tol=1e-7, maxit=40, solver=None, anders
     the plain step whenever the accelerated rest shape inverts a tet or
     makes the error grow."""
     solver = dict(solver or {})
+    if maxit < 1:
+        raise ValueError('inverse maxit must be at least 1')
     t0 = time.time()
     free = ~model.fixed
     X_rest = np.array(X_target, float)
@@ -58,6 +60,11 @@ def inverse_rest(model, X_target, loads, tol=1e-7, maxit=40, solver=None, anders
         hist.append(e)
         if e <= tol:
             break
+        # x and model's assembled rest matrices describe this X_rest. On an
+        # exhausted budget, return that evaluated state rather than an untested
+        # next iterate paired with the previous state's equilibrium.
+        if it + 1 == maxit:
+            break
         f = np.where(free[:, None], -err, 0.0).ravel()
         xk = X_rest.ravel().copy()
         if prev is not None:
@@ -75,6 +82,7 @@ def inverse_rest(model, X_target, loads, tol=1e-7, maxit=40, solver=None, anders
         X_rest = (xk + step).reshape(-1, 3)
     return X_rest, x, {
         'iterations': len(hist), 'error_max_S': hist[-1], 'history': hist,
+        'converged': bool(hist[-1] <= tol),
         'newton_iterations': newton_iters, 'seconds': time.time() - t0, 'anderson_steps': accepted_aa,
         'residual': info['residual'], 'min_det': info['min_det'],
         'rest_min_volume_ratio': float((model.V_rest / _vol(model, X_target)).min()),

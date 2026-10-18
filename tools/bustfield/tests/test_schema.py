@@ -26,6 +26,20 @@ def test_python_params_valid():
     validate(p)
 
 
+def test_runtime_linear_and_antisymmetric_ops_valid():
+    p = copy.deepcopy(DEFAULT_PARAMS)
+    p['targets']['runtime'] = [
+        {'type': 'linear', 'at': [0, 0, 0], 'A': [0.1, 0, 0, 0, -0.1, 0, 0, 0, 0], 'parity': -1},
+        {'type': 'linear', 'at': [0, 0, 0], 'A': [0] * 9, 'radius': 0.2},
+    ]
+    p['targets']['bust_lift_up'][0]['parity'] = -1
+    validate(p)
+    for change in ({'A': [0] * 8}, {'radius': -0.1}, {'parity': 0}, {'parity': True}, {'A': [float('inf')] * 9}):
+        bad = copy.deepcopy(p)
+        bad['targets']['runtime'][0].update(change)
+        assert errors(bad), change
+
+
 @needs_changli
 def test_bind_export_params_valid(changli):
     validate(changli.params)

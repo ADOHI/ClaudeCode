@@ -5,8 +5,9 @@ import fs from 'node:fs';
 import { createBustField, DEFAULT_PARAMS, cloneParams, sliderToWeights } from '../../web/src/core/field.js';
 import { bakeMesh } from '../../web/src/core/bake.js';
 import { autoFitAnchor } from '../../web/src/core/autofit.js';
-import { m4Linear, m3Vec } from '../../web/src/core/vec.js';
 import { prepareMorpho, selectTriangles, SKIN_MATERIALS, NON_TORSO_MATERIALS } from '../../web/src/core/morpho.js';
+
+const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 
 const decode = (b64, T) => {
   if (!b64) return null;
@@ -55,15 +56,12 @@ export function viewerParams(bind, base = DEFAULT_PARAMS) {
 export function bakeBind(bind, params) {
   const field = createBustField(bind.frame, params);
   const deltas = bind.meshes.map((m) => {
-    const res = bakeMesh({ positions: m.pos, normals: null, bindMatrix: m.bindMatrix, mask: m.mask }, field, field.targets);
-    const L = m4Linear(m.bindMatrix);
+    // bust-bind/1 exports have already applied the original mesh's bindMatrix
+    // to positions. Bake directly in that space, producing bind-space deltas
+    // for prepareMorpho; applying m.bindMatrix here would transform twice.
+    const res = bakeMesh({ positions: m.pos, normals: null, bindMatrix: IDENTITY, mask: m.mask }, field, field.targets);
     const out = {};
-    for (const t of field.targets) {
-      const dl = res.targets[t].dPos;
-      const db = new Float32Array(dl.length);
-      for (let i = 0; i < dl.length; i += 3) db.set(m3Vec(L, [dl[i], dl[i + 1], dl[i + 2]]), i);
-      out[t] = db;
-    }
+    for (const t of field.targets) out[t] = res.targets[t].dPos;
     return out;
   });
   return { field, deltas };

@@ -1,13 +1,13 @@
 // Validation of the bust field and of baked blend shapes.
 //
 // These checks are what decide whether the method is safe to port:
-//   fieldCheck  - injectivity (det(I + sum w_k J_k) > 0 => no fold-over, no
-//                 new cloth/body intersections) and local volume change
+//   fieldCheck  - sampled local orientation (det(I + sum w_k J_k) > 0)
+//                 and local volume change; not a global collision certificate
 //   meshCheck   - seam / cross-mesh consistency and triangle flips on the
 //                 actual baked deltas
 //   normalCheck - analytic normal deltas (F^-T) vs. geometric recomputation
 
-import { m3Det, cross, dot, normalize } from './vec.js';
+import { m3Det, m3Inverse, m3Transpose, m3Vec, cross, dot, normalize } from './vec.js';
 import { sliderToWeights } from './field.js';
 
 // Every corner of the slider space (size, style, lift, spread).
@@ -76,6 +76,140 @@ export function fieldCheck(field, { res = 14, combos = extremeCombos() } = {}) {
 
 function addI(J, s) {
   return [s * J[0] + 1, s * J[1], s * J[2], s * J[3], s * J[4] + 1, s * J[5], s * J[6], s * J[7], s * J[8] + 1];
+}
+
+/** Enumerate every Cartesian weight assignment for each target pair/triple.
+ * These are diagnostics over target space, including combinations the UI
+ * cannot produce (e.g. simultaneous size-up and size-down). Supply explicit
+ * combinations to combinationCheck to restrict the check to a runtime domain.
+ */
+export function targetCombinations(targets, { sizes = [2, 3], levels = [0.25, 0.5, 0.75, 1] } = {}) {
+  if (new Set(targets).size !== targets.length) throw new Error('duplicate target names');
+  if (!levels.length || levels.some((w) => !Number.isFinite(w) || w <= 0 || w > 1)) throw new Error('levels must be in (0, 1]');
+  if (sizes.some((n) => !Number.isInteger(n) || n < 1)) throw new Error('sizes must be positive integers');
+  const result = [];
+  function assign(names, index, weights) {
+    if (index === names.length) { result.push({ ...weights }); return; }
+    for (const w of new Set(levels)) assign(names, index + 1, { ...weights, [names[index]]: w });
+  }
+  function choose(start, remaining, names) {
+    if (!remaining) { assign(names, 0, {}); return; }
+    for (let i = start; i <= targets.length - remaining; i++) choose(i + 1, remaining - 1, [...names, targets[i]]);
+  }
+  for (const size of new Set(sizes)) choose(0, size, []);
+  return result;
+}
+
+// Bind-space cell centres in each support box. Overlapping boxes may sample a
+// point twice, intentionally; the field itself always evaluates both sides.
+function combinationPoints(field, res) {
+  if (!Number.isInteger(res) || res < 1) throw new Error('res must be a positive integer');
+  const points = [];
+  for (const side of field.sides) {
+    for (let i = 0; i < res; i++) for (let j = 0; j < res; j++) for (let k = 0; k < res; k++) {
+      const q = [i, j, k].map((v, axis) => {
+        const interval = field.box[['x', 'y', 'z'][axis]];
+        return interval[0] + (v + 0.5) / res * (interval[1] - interval[0]);
+      });
+      const d = field.fromSideVec(side, q);
+      const p = side.base.map((v, axis) => v + d[axis]);
+      if (field.weight(p) > 0) points.push(p);
+    }
+  }
+  return points;
+}
+
+function transformedNormal(F, n) {
+  const inverse = m3Inverse(F);
+  return inverse ? normalize(m3Vec(m3Transpose(inverse), n)) : null;
+}
+
+function normalAngle(a, b) {
+  if (!a || !b || Math.hypot(...a) < 1e-12 || Math.hypot(...b) < 1e-12) return 180;
+  // atan2 is stable near zero, unlike acos(dot(a,b)).
+  return Math.atan2(Math.hypot(...cross(a, b)), dot(a, b)) * 180 / Math.PI;
+}
+
+/** Compare baked normal-delta blending against the combined field's F^-T.
+ * All inputs are in bind space. `normals` is one normal per point; omitted =>
+ * test all three coordinate-axis normals at every point and retain the worst.
+ * `combinations` contains direct target-weight maps (not UI slider values).
+ * `includeMaps:false` keeps the same summaries without the large per-point map.
+ * Results are sampled diagnostics. A positive determinant is local, and does
+ * not certify global injectivity, triangle intersections, or garment clearance.
+ */
+export function combinationCheck(field, {
+  points = null, normals = null, res = 6,
+  targets = field.targets, combinations = null,
+  sizes = [2, 3], levels = [0.25, 0.5, 0.75, 1],
+  normalErrorThreshold = 3, minDetThreshold = 0.2, includeMaps = true,
+} = {}) {
+  if (!Number.isFinite(normalErrorThreshold) || normalErrorThreshold < 0 || !Number.isFinite(minDetThreshold) || minDetThreshold < 0) throw new Error('thresholds must be finite and nonnegative');
+  const samples = points ?? combinationPoints(field, res);
+  if (!samples.length) throw new Error('combination check requires at least one sample');
+  if (samples.some((p) => p.length !== 3 || !Array.from(p).every(Number.isFinite))) throw new Error('points must be finite xyz vectors');
+  if (normals && (normals.length !== samples.length || normals.some((n) => n.length !== 3 || !Array.from(n).every(Number.isFinite) || Math.hypot(...n) === 0))) throw new Error('normals must contain one nonzero finite xyz vector per sample');
+  if (targets.some((t) => !field.targets.includes(t))) throw new Error('unknown target');
+  const combos = combinations ?? targetCombinations(targets, { sizes, levels });
+  if (!combos.length) throw new Error('combination check requires at least one combination');
+  for (const c of combos) for (const [t, w] of Object.entries(c)) {
+    if (!targets.includes(t)) throw new Error(`unknown target ${t}`);
+    if (!Number.isFinite(w)) throw new Error('combination weights must be finite');
+  }
+  const basis = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+  const cache = samples.map((p, i) => {
+    const ns = normals ? [normalize(normals[i])] : basis;
+    const J = Object.fromEntries(targets.map((t) => [t, field.jacobian(t, p)]));
+    if (Object.values(J).some((j) => j.length !== 9 || !Array.from(j).every(Number.isFinite))) throw new Error('field returned a nonfinite Jacobian');
+    return { ns, J, baked: Object.fromEntries(targets.map((t) => [t, ns.map((n) => transformedNormal(addI(J[t], 1), n))])) };
+  });
+  let globalMin = Infinity, globalMax = 0, globalWorst = null;
+  const results = combos.map((weights, ci) => {
+    let minDet = Infinity, minAt = null, maxNormalError = 0, worstNormalAt = null, sum = 0, singularSamples = 0;
+    const determinants = [], normalErrors = [];
+    const active = Object.entries(weights).filter(([, w]) => w !== 0);
+    for (const [i, sample] of cache.entries()) {
+      const F = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+      for (const [t, w] of active) for (let e = 0; e < 9; e++) F[e] += w * sample.J[t][e];
+      const det = m3Det(F);
+      if (det < minDet) { minDet = det; minAt = i; }
+      let error = 0, singular = false;
+      for (const [ni, n] of sample.ns.entries()) {
+        const blended = n.slice();
+        for (const [t, w] of active) {
+          const endpoint = sample.baked[t][ni];
+          if (!endpoint) { singular = true; break; }
+          for (let axis = 0; axis < 3; axis++) blended[axis] += w * (endpoint[axis] - n[axis]);
+        }
+        const exact = transformedNormal(F, n);
+        if (!exact) singular = true;
+        error = Math.max(error, singular ? 180 : normalAngle(normalize(blended), exact));
+      }
+      if (singular) singularSamples++;
+      if (error > maxNormalError) { maxNormalError = error; worstNormalAt = i; }
+      sum += error;
+      determinants.push(det); normalErrors.push(error);
+    }
+    const sorted = normalErrors.slice().sort((a, b) => a - b);
+    const reasons = [];
+    if (minDet <= minDetThreshold) reasons.push('determinant');
+    if (maxNormalError > normalErrorThreshold) reasons.push('normal-error');
+    if (singularSamples) reasons.push('singular-normal-transform');
+    if (minDet < globalMin) globalMin = minDet;
+    if (maxNormalError > globalMax) { globalMax = maxNormalError; globalWorst = ci; }
+    return {
+      weights: { ...weights }, minDet, minAt,
+      normalError: { mean: sum / samples.length, p95: sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))], max: maxNormalError, worstAt: worstNormalAt },
+      singularSamples, needsCorrective: reasons.length > 0, reasons,
+      ...(includeMaps ? { map: { determinants, normalErrorDegrees: normalErrors } } : {}),
+    };
+  });
+  return {
+    points: samples.map((p) => Array.from(p)), sampleCount: samples.length,
+    thresholds: { normalErrorDegrees: normalErrorThreshold, minDet: minDetThreshold },
+    combinations: results, minDet: globalMin, maxNormalError: globalMax, worstNormalCombination: globalWorst,
+    correctiveCombinations: results.flatMap((r, index) => r.needsCorrective ? [{ index, weights: r.weights, reasons: r.reasons }] : []),
+  };
 }
 
 /**

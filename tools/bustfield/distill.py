@@ -503,7 +503,9 @@ def fit_targets(
             "minDet": gmin_gate,
             "minDet_all_res": gmin,
             "per_res": gper,
-            "passed": bool(gmin_gate > gate),
+            # All sampled repair grids are safety checks too. In particular,
+            # a res-14 pass must not hide a res-20 fold after op rounding.
+            "passed": bool(gmin > gate),
             "minDet_fixed_targets_only": fixed,
         },
         history=history,

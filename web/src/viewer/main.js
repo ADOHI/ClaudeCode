@@ -4,7 +4,12 @@ import GUI from 'lil-gui';
 import { loadModel, resolveBones, collectMeshes, entriesFromFileList, entriesFromZip } from './model.js';
 import { BustRig } from './rig.js';
 import { DEFAULT_PARAMS, cloneParams, buildBodyFrame } from '../core/field.js';
-import { BustDynamics, DEFAULT_DYNAMICS, DEFAULT_POSE, poseCorrective, combineWeights } from '../core/runtime.js';
+import { BustDynamics, DEFAULT_DYNAMICS, DEFAULT_POSE, poseCorrective, bustWeights, withRuntimeTargets, dynamicEnvelope, runtimeTargets } from '../core/runtime.js';
+import { BANDS, scoreBands } from '../core/morpho.js';
+import { parseParams, applyParams, parseProfile } from './config.js';
+import { DemoMotion } from './motion.js';
+import { TissueRig } from './tissue-rig.js';
+import { sliderToWeights } from '../core/field.js';
 
 const qs = new URLSearchParams(location.search);
 const DEFAULT_MODEL = qs.get('model') ?? `${import.meta.env.BASE_URL}models/Seed-san.vrm`;
@@ -13,11 +18,16 @@ const DEFAULT_MODEL = qs.get('model') ?? `${import.meta.env.BASE_URL}models/Seed
 const state = {
   sliders: { size: 0, style: 0.5, lift: 0, spread: 0 },
   params: cloneParams(DEFAULT_PARAMS),
-  dyn: { ...DEFAULT_DYNAMICS },
+  dyn: { ...DEFAULT_DYNAMICS, mapping: 'dedicated', vskin: { ...DEFAULT_DYNAMICS.vskin } },
+  tissue: { enabled: true, softness: 0.8, damping: 3.5, exaggeration: 1.3, iterations: 3, coverage: 1.18, wallInset: 0.04 },
   pose: { ...DEFAULT_POSE },
   anim: { play: false, armDown: 65, bob: 0.035, bobHz: 1.8, armCycle: false },
-  view: { heatmap: false, gizmo: false, hud: qs.get('hud') !== '0', autoFit: true },
+  view: { heatmap: false, tissueCoverage: false, gizmo: false, hud: qs.get('hud') !== '0', autoFit: true, metrics: true, selection: 'outer' },
+  preset: 'Hand tuned',
+  profile: null,
 };
+const presets = new Map();
+let activeEnvelope;
 
 // ---------------------------------------------------------------- three
 const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
@@ -58,8 +68,10 @@ addEventListener('resize', () => {
 
 // ---------------------------------------------------------------- model
 let model = null; // { root, vrm, name, rig, bones, restFrame, rest }
+let tissue = null, tissueKey = null;
 let report = null;
 const dynamics = new BustDynamics(state.dyn);
+const demoMotion = new DemoMotion();
 const hud = document.getElementById('hud');
 const statusEl = document.getElementById('status');
 
@@ -68,6 +80,7 @@ function worldPos(o) {
 }
 
 async function open(source) {
+  releaseTissue();
   statusEl.textContent = 'loading…';
   if (model) {
     scene.remove(model.root);
@@ -77,8 +90,13 @@ async function open(source) {
   scene.add(loaded.root);
   loaded.root.updateMatrixWorld(true);
   const bones = resolveBones(loaded.root, loaded.vrm);
+  for (const [key, name] of Object.entries(state.profile?.bones ?? {})) {
+    const bone = loaded.root.getObjectByName(name);
+    if (!bone?.isBone) throw new Error(`Profile bone not found: ${key} = ${name}`);
+    bones[key] = bone;
+  }
   const meshes = collectMeshes(loaded.root);
-  const rig = new BustRig({ ...loaded, meshes, bones });
+  const rig = new BustRig({ ...loaded, meshes, bones, profile: state.profile });
   model = { ...loaded, rig, bones };
   setLighting(loaded.mmd ? 'mmd' : 'default');
   const missing = rig.missingBones();
@@ -98,22 +116,31 @@ async function open(source) {
   });
   model.chestBindInv = new THREE.Matrix4();
   setupPosing();
+  demoMotion.reset();
   rig.prepare(state.params.mask);
-  if (state.view.autoFit) autoFit(false);
+  // Imported fields are already fitted to their source character. Never move
+  // their anchors silently; only the hand-tuned baseline is auto-fitted.
+  if (state.view.autoFit && state.preset === 'Hand tuned' && !state.profile?.region?.anchor) autoFit(false);
+  applyProfileRegion();
+  if (state.preset === 'Hand tuned') presets.set('Hand tuned', cloneParams(state.params));
+  syncPresetOptions();
+  Object.assign(dynamics.o, { restAxes: model.restFrame });
+  dynamics.reset();
   rebake();
   setView('threeQuarter');
   statusEl.textContent = loaded.name;
 }
 
 function autoFit(doBake = true) {
+  if (!model?.rig?.frame) return;
   const fit = model.rig.autoFit(state.params);
   model.fit = fit;
   if (fit) {
-    state.params.anchor = {
+    Object.assign(state.params.anchor, {
       x: +fit.anchor.x.toFixed(3),
       y: +fit.anchor.y.toFixed(3),
       z: +fit.anchor.z.toFixed(3),
-    };
+    });
     gui.controllersRecursive().forEach((c) => c.updateDisplay());
   }
   if (doBake) rebake();
@@ -121,10 +148,116 @@ function autoFit(doBake = true) {
 
 function rebake() {
   if (!model?.rig?.frame) return;
-  const r = model.rig.bake(state.params);
+  releaseTissue();
+  updateDynamics();
+  dynamics.reset();
+  activeEnvelope = dynamicEnvelope(state.params, runtimeTargets(state.params));
+  // Extra dynamic shapes must exist before their signed weights are driven.
+  const r = model.rig.bake(withRuntimeTargets(state.params));
+  if (model.rig.metricSelection !== state.view.selection) model.rig.prepareMetrics(state.view.selection);
   report = { bake: r, validation: null };
   buildGizmo();
   renderHud();
+}
+
+function updateDynamics() {
+  Object.assign(dynamics.o, state.dyn, { params: state.params, restAxes: model?.restFrame ?? null });
+}
+
+function releaseTissue() {
+  tissue?.dispose();
+  tissue = null; tissueKey = null;
+}
+
+function prepareRig() {
+  releaseTissue();
+  model.rig.prepare(state.params.mask);
+}
+
+function ensureTissue() {
+  const key = JSON.stringify([state.sliders, state.tissue.coverage, state.tissue.wallInset]);
+  if (tissue && tissueKey === key) return tissue;
+  releaseTissue();
+  tissue = new TissueRig(model.rig, sliderToWeights(state.sliders), model.restFrame, state.tissue);
+  tissueKey = key;
+  if (state.view.tissueCoverage) model.rig.setHeatmap(true, tissue.coverage());
+  return tissue;
+}
+
+function refreshHeatmap() {
+  if (!model) return;
+  const coverage = state.view.tissueCoverage && state.tissue.enabled ? ensureTissue().coverage() : null;
+  model.rig.setHeatmap(state.view.heatmap || !!coverage, coverage);
+}
+
+function applyProfileRegion() {
+  const region = state.profile?.region;
+  if (!region) return;
+  applyParams(state.params, { ...state.params, ...region, anchor: { ...state.params.anchor, ...region.anchor }, window: { ...state.params.window, ...region.window } });
+}
+
+function syncPresetOptions() {
+  activePreset = state.preset;
+  presetController.options([...presets.keys()]);
+  gui.controllersRecursive().forEach((c) => c.updateDisplay());
+}
+
+function selectPreset(name) {
+  if (!presets.has(name)) throw new Error(`Unknown params preset: ${name}`);
+  // Keep manual edits when switching back to this slot.
+  presets.set(state.preset, cloneParams(state.params));
+  applyParams(state.params, presets.get(name));
+  state.preset = name;
+  if (model?.rig?.frame) prepareRig();
+  rebake();
+  syncPresetOptions();
+}
+
+function importParams(input, name = 'Imported params') {
+  const params = parseParams(input);
+  // Replace an existing imported slot without overwriting it with the old UI state.
+  presets.set(state.preset, cloneParams(state.params));
+  presets.set(name, params);
+  applyParams(state.params, params);
+  state.preset = name;
+  if (model?.rig?.frame) prepareRig();
+  rebake();
+  syncPresetOptions();
+  return params;
+}
+
+async function importProfile(input) {
+  const profile = parseProfile(input);
+  // Resolve all overrides before mutating the active rig.
+  const overrides = Object.fromEntries(Object.entries(profile.bones).map(([key, name]) => {
+    const bone = model?.root.getObjectByName(name);
+    if (model && !bone?.isBone) throw new Error(`Profile bone not found: ${key} = ${name}`);
+    return [key, bone];
+  }));
+  state.profile = profile;
+  applyProfileRegion();
+  if (model) {
+    // Restore the authored pose before recording new rest axes/bone rotations.
+    if (model.rest) {
+      model.pose.mover.position.copy(model.rest.moverPos);
+      model.pose.lua.quaternion.copy(model.rest.lua);
+      model.pose.rua.quaternion.copy(model.rest.rua);
+      model.vrm?.update(0);
+      model.root.updateMatrixWorld(true);
+    }
+    model.bones = { ...resolveBones(model.root, model.vrm), ...overrides };
+    model.rig.bones = model.bones;
+    model.rig.profile = profile;
+    const missing = model.rig.missingBones();
+    if (missing.length) throw new Error(`Profile missing bones: ${missing.join(', ')}`);
+    model.restFrame = buildBodyFrame(Object.fromEntries(['hips', 'chest', 'neck', 'leftUpperArm', 'rightUpperArm'].map((k) => [k, worldPos(model.bones[k])])));
+    setupPosing();
+    demoMotion.reset();
+    prepareRig();
+    rebake();
+  }
+  gui.controllersRecursive().forEach((c) => c.updateDisplay());
+  return profile;
 }
 
 function runValidation() {
@@ -137,7 +270,13 @@ function runValidation() {
 // ---------------------------------------------------------------- posing
 function setupPosing() {
   const { vrm, bones } = model;
-  const node = (k) => (vrm ? vrm.humanoid.getNormalizedBoneNode(k) : bones[k]);
+  const node = (k) => {
+    if (!vrm) return bones[k];
+    // VRM.update copies normalized human bones to their raw counterparts.
+    // A profile naming that same raw bone must still drive its normalized node.
+    if (!state.profile?.bones[k] || vrm.humanoid.getRawBoneNode(k) === bones[k]) return vrm.humanoid.getNormalizedBoneNode(k) ?? bones[k];
+    return bones[k];
+  };
   // Body bob moves the lowest common ancestor of hips and chest: for MMD
   // rigs 下半身 (hips) is a sibling of 上半身, so moving it alone would tear
   // the body apart.
@@ -160,6 +299,7 @@ function setupPosing() {
     return THREE.MathUtils.radToDeg(Math.acos(THREE.MathUtils.clamp(-d.dot(new THREE.Vector3(...f.up)), -1, 1)));
   };
   model.rest = {
+    chestWorld: bones.chest.getWorldQuaternion(new THREE.Quaternion()),
     moverPos: model.pose.mover.position.clone(),
     lua: model.pose.lua.quaternion.clone(),
     rua: model.pose.rua.quaternion.clone(),
@@ -175,14 +315,11 @@ function rotateAboutWorldAxis(bone, restLocal, axis, angle) {
   bone.quaternion.copy(_pq).invert().multiply(_q).multiply(_pq).multiply(restLocal);
 }
 
-function applyPose(t) {
+function applyPose(dt) {
   const f = model.restFrame;
-  const { anim } = state;
-  let down = anim.armDown;
-  if (anim.play && anim.armCycle) {
-    const s = 0.5 - 0.5 * Math.cos(2 * Math.PI * 0.18 * t);
-    down = THREE.MathUtils.lerp(anim.armDown, -80, s);
-  }
+  const motion = demoMotion.update(dt, state.anim);
+  model.motion = motion;
+  const down = motion.armDown;
   // `down` is measured from the T-pose: target elevation = 90 - down.
   const target = 90 - down;
   const aL = THREE.MathUtils.degToRad(model.rest.luaDeg - target);
@@ -191,9 +328,8 @@ function applyPose(t) {
   rotateAboutWorldAxis(model.pose.rua, model.rest.rua, f.forward, aR);
   const hips = model.pose.mover;
   hips.position.copy(model.rest.moverPos);
-  if (anim.play && anim.bob > 0) {
-    // bouncy "walk" bob: |sin| gives a sharp contact each step
-    const y = (Math.abs(Math.sin(Math.PI * anim.bobHz * t)) - 0.6) * anim.bob * f.S;
+  if (motion.bob !== 0) {
+    const y = motion.bob * f.S;
     const up = _v.fromArray(f.up).multiplyScalar(y);
     hips.parent.updateWorldMatrix(true, false);
     const inv = new THREE.Matrix3().setFromMatrix4(hips.parent.matrixWorld).invert();
@@ -285,6 +421,7 @@ function setView(name) {
 
 // ---------------------------------------------------------------- HUD
 const fmt = (x, d = 3) => (x === undefined || x === null || Number.isNaN(x) ? '-' : Number(x).toFixed(d));
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 function renderHud() {
   hud.classList.toggle('hidden', !state.view.hud);
   if (!state.view.hud) return;
@@ -293,10 +430,11 @@ function renderHud() {
     hud.textContent = 'loading…';
     return;
   }
-  L.push(`<b>${model.name}</b>`);
+  L.push(`<b>${esc(model.name)}</b>`);
+  L.push(`params: ${esc(state.preset)}${state.profile ? ` | profile: ${esc(state.profile.name)}` : ''}`);
   const b = model.bones;
-  L.push(`bones: ${Object.entries(b).map(([k, v]) => `${k}=${v ? v.name : '<span class=bad>?</span>'}`).join(', ')}`);
-  if (report?.error) L.push(`<span class=bad>${report.error}</span>`);
+  L.push(`bones: ${Object.entries(b).map(([k, v]) => `${k}=${v ? esc(v.name) : '<span class=bad>?</span>'}`).join(', ')}`);
+  if (report?.error) L.push(`<span class=bad>${esc(report.error)}</span>`);
   if (report?.bake) {
     const r = report.bake;
     L.push(`bake: ${fmt(r.ms, 0)} ms, ${r.touched} verts on ${r.meshes} meshes, S=${fmt(model.rig.frame.S)}`);
@@ -304,8 +442,17 @@ function renderHud() {
     L.push(fit
       ? `auto-fit: anchor ${fmt(fit.anchor.x)}, ${fmt(fit.anchor.y)}, ${fmt(fit.anchor.z)}  prominence ${fmt(fit.prominence)}${fit.usedPrior ? ' <span class=warn>(flat chest → anatomical prior)</span>' : ''}`
       : '<span class=warn>auto-fit failed, using manual anchor</span>');
-    const per = model.rig.baked.map((e) => `${e.mesh.name || '(mesh)'}:${e.result.touched}`);
+    const per = model.rig.baked.map((e) => `${esc(e.mesh.name || '(mesh)')}:${e.result.touched}`);
     L.push(`  ${per.join('  ')}`);
+  }
+  if (state.view.metrics && model.rig.morpho) {
+    const metrics = model.rig.measure(model.weights);
+    const m = metrics.mean;
+    L.push(`<b>morphometrics</b> (${state.view.selection}, bind shape)`);
+    L.push(`upper/lower ${fmt(m.upperPoleFrac == null ? null : m.upperPoleFrac * 100, 1)} / ${fmt(m.upperPoleFrac == null ? null : (1 - m.upperPoleFrac) * 100, 1)}% | apex ${fmt(m.tiltDeg, 1)}°`);
+    L.push(`projection/base ${fmt(m.projectionRatio)} | IMF ${fmt(m.imfY)} S | upper ${esc(m.upperShape ?? '-')}`);
+    L.push(`natural distance ${fmt(scoreBands(m, BANDS.natural, { reference: model.rig.baseMetrics.mean }).distance, 2)} | anime hypothesis ${fmt(scoreBands(m, BANDS.anime, { reference: model.rig.baseMetrics.mean }).distance, 2)}`);
+    if (!metrics.ok || m.flags.length) L.push(`<span class=warn>measurement: ${esc(m.flags.join(', ') || 'insufficient surface')}</span>`);
   }
   const v = report?.validation;
   if (v) {
@@ -326,8 +473,20 @@ function renderHud() {
     }
   }
   if (model.weights) {
+    L.push(state.tissue.enabled ? `<b>3D tissue</b> body ${fmt(state.anim.bobHz, 1)} Hz | softness ${fmt(state.tissue.softness, 2)} | damping ${fmt(state.tissue.damping, 1)}`
+      : `<b>legacy response</b> body ${fmt(state.anim.bobHz, 1)} Hz | spring ${fmt(state.dyn.frequency, 1)} Hz | damping ${fmt(state.dyn.damping, 2)}`);
+    if (tissue) {
+      const s = tissue.report();
+      L.push(`volume max ${fmt(Math.max(...s.zoneVolumeErrors.map(Math.abs)) * 100, 2)}% | min det ${fmt(s.minDet)} | strain ${fmt(s.maxStrain * 100, 1)}%`);
+      L.push(`${s.nodeCount} nodes / ${s.tetCount} tets | ${s.mappedVertices} mapped verts | ${fmt(s.ms, 1)} ms`);
+      L.push(`region: ${s.proxy.region.map(r => r.method).join(' / ')} | collar ${fmt(s.proxy.coverage, 2)}×`);
+      if (state.view.tissueCoverage) L.push('moving region: red = free, blue = attached / outside');
+      if (s.safetyClamps || s.normalGuards) L.push(`<span class=warn>limited steps ${s.safetyClamps} | normal guards ${s.normalGuards}</span>`);
+      if (s.transferScale < 0.999) L.push(`<span class=warn>display deformation limited to ${fmt(s.transferScale * 100, 0)}%</span>`);
+      if (s.resetCount) L.push(`motion resets ${s.resetCount} | last: ${esc(s.lastReset)}`);
+    }
     L.push('<b>weights</b>');
-    L.push(Object.entries(model.weights).filter(([, w]) => w > 0.001).map(([k, w]) => `${k}=${fmt(w, 2)}`).join('  ') || '(all 0)');
+    L.push(Object.entries(model.weights).filter(([, w]) => Math.abs(w) > 0.001).map(([k, w]) => `${esc(k)}=${fmt(w, 2)}`).join('  ') || '(all 0)');
   }
   if (model.poseInfo?.armDeg !== undefined) L.push(`arm elevation ${fmt(model.poseInfo.armDeg, 0)}°`);
   hud.innerHTML = L.join('\n');
@@ -335,24 +494,63 @@ function renderHud() {
 
 // ---------------------------------------------------------------- GUI
 const gui = new GUI({ title: 'Bust Morph Lab' });
+presets.set('Hand tuned', cloneParams(state.params));
+const fP = gui.addFolder('Params / character');
+const presetController = fP.add(state, 'preset', [...presets.keys()]).name('params preset').onChange((name) => {
+  // lil-gui writes state.preset first; restore the actual previous slot.
+  state.preset = activePreset;
+  selectPreset(name);
+  activePreset = name;
+});
+let activePreset = state.preset;
+fP.add({ loadParams: () => paramsInput.click() }, 'loadParams').name('load params JSON…');
+fP.add({ loadProfile: () => profileInput.click() }, 'loadProfile').name('load character profile…');
 const fS = gui.addFolder('Sliders (blend shapes)');
 fS.add(state.sliders, 'size', -1, 1, 0.01).name('size −/+');
 fS.add(state.sliders, 'style', 0, 1, 0.01).name('style natural→stylized');
 fS.add(state.sliders, 'lift', -1, 1, 0.01).name('lift');
 fS.add(state.sliders, 'spread', -1, 1, 0.01).name('spread in/out');
 
-const fA = gui.addFolder('Animation / runtime');
-fA.add(state.anim, 'play');
-fA.add(state.anim, 'armDown', -80, 85, 1).name('arm down (deg)');
-fA.add(state.anim, 'armCycle').name('arm raise cycle');
-fA.add(state.anim, 'bob', 0, 0.1, 0.001).name('body bob (S)');
-fA.add(state.anim, 'bobHz', 0.5, 4, 0.1);
-fA.add(state.dyn, 'enabled').name('jiggle (bone-free)').onChange(() => Object.assign(dynamics.o, state.dyn));
-for (const [k, lo, hi] of [['frequency', 0.5, 6], ['damping', 0.02, 1], ['gain', 0, 3], ['squashStretch', 0, 1.5]]) {
-  fA.add(state.dyn, k, lo, hi, 0.01).onChange(() => Object.assign(dynamics.o, state.dyn));
+const fM = gui.addFolder('Test body motion');
+fM.add(state.anim, 'play').name('play body motion');
+fM.add(state.anim, 'armDown', -80, 85, 1).name('arm down (deg)');
+fM.add(state.anim, 'armCycle').name('arm raise cycle');
+fM.add(state.anim, 'bob', 0, 0.1, 0.001).name('body amplitude (S)');
+fM.add(state.anim, 'bobHz', 0.5, 4, 0.1).name('body cycles (Hz)');
+fM.add({ stop: () => { state.anim.play = false; gui.controllersRecursive().forEach(c => c.updateDisplay()); } }, 'stop').name('stop body / let settle');
+fM.add({ baselineDemo }, 'baselineDemo').name('reset response demo');
+const fA = gui.addFolder('Bust response');
+const fT = gui.addFolder('3D soft tissue (research)');
+fT.add(state.tissue, 'enabled').name('volumetric tissue').onChange(() => { releaseTissue(); dynamics.reset(); refreshHeatmap(); });
+fT.add(state.view, 'tissueCoverage').name('show moving region').onChange(refreshHeatmap);
+fT.add(state.tissue, 'coverage', 1, 1.5, 0.01).name('region coverage').onFinishChange(() => { releaseTissue(); refreshHeatmap(); });
+fT.add(state.tissue, 'wallInset', 0, 0.12, 0.005).name('base depth margin (S)').onFinishChange(() => { releaseTissue(); refreshHeatmap(); });
+fT.add(state.tissue, 'softness', 0, 1, 0.01).name('softness');
+fT.add(state.tissue, 'damping', 0.5, 10, 0.1).name('settling / damping');
+fT.add(state.tissue, 'exaggeration', 0, 3, 0.01).name('motion exaggeration');
+fT.add({ reset: () => tissue?.reset() }, 'reset').name('reset tissue motion');
+fA.add(state.dyn, 'enabled').name('jiggle (bone-free)').onChange(updateDynamics);
+for (const [k, name, lo, hi] of [['frequency', 'spring frequency (Hz)', 0.5, 6], ['damping', 'damping', 0.02, 1], ['gain', 'motion exaggeration', 0, 3]]) {
+  const c = fA.add(state.dyn, k, lo, hi, 0.01).name(name).onChange(updateDynamics);
+  c.domElement.title = k === 'frequency' ? '복원 진동수입니다. 몸의 애니메이션 속도와 별도 설정입니다.' : k === 'damping' ? '높을수록 잔진동이 빨리 가라앉습니다.' : '몸의 가속도에 대한 반응을 증폭합니다.';
 }
+fA.add(state.dyn.vskin, 'enabled').name('velocity shapes');
 fA.add(state.pose, 'enabled').name('pose corrective');
 fA.add(state.pose, 'lift', 0, 1, 0.01).name('arm-raise lift');
+fA.add({ reset: () => dynamics.reset() }, 'reset').name('clear residual wobble');
+fA.close();
+
+function baselineDemo() {
+  Object.assign(state.anim, { play: true, bob: 0.035, bobHz: 1.8, armDown: 65, armCycle: false });
+  Object.assign(state.dyn, { enabled: true, frequency: 2.4, damping: 0.3, gain: 1 });
+  Object.assign(state.tissue, { softness: 0.8, damping: 3.5, exaggeration: 1.3 });
+  releaseTissue();
+  state.dyn.vskin.enabled = false; // isolate the spring response from art distortions
+  demoMotion.reset();
+  updateDynamics();
+  dynamics.reset();
+  gui.controllersRecursive().forEach(c => c.updateDisplay());
+}
 
 const fR = gui.addFolder('Region / kernel (rebake)');
 fR.add(state.params, 'kernel', ['kelvinlet', 'smooth']).onChange(rebake);
@@ -361,17 +559,19 @@ fR.add(state.params.anchor, 'y', -0.5, 0.5, 0.005).name('anchor y').onFinishChan
 fR.add(state.params.anchor, 'z', -0.3, 0.6, 0.005).name('anchor z (base)').onFinishChange(rebake);
 fR.add(state.params, 'depth', 0.05, 0.4, 0.005).onFinishChange(rebake);
 for (const k of ['x', 'yUp', 'yDown', 'zFront', 'zBack', 'hardness', 'hardnessZ']) {
-  fR.add(state.params.window, k, 0, k.startsWith('hard') ? 0.95 : 1.5, 0.005).name(`window ${k}`).onFinishChange(rebake);
+  fR.add(state.params.window, k, k.startsWith('hard') ? 0 : 0.005, k.startsWith('hard') ? 0.95 : 1.5, 0.005).name(`window ${k}`).onFinishChange(rebake);
 }
-fR.add(state.params.mask, 'excludeArms').onChange(() => { model.rig.prepare(state.params.mask); rebake(); });
-fR.add(state.params.mask, 'excludeHead').onChange(() => { model.rig.prepare(state.params.mask); rebake(); });
+fR.add(state.params.mask, 'excludeArms').onChange(() => { if (model) prepareRig(); rebake(); });
+fR.add(state.params.mask, 'excludeHead').onChange(() => { if (model) prepareRig(); rebake(); });
 fR.add({ autoFit: () => autoFit(true) }, 'autoFit').name('auto-fit anchors');
 fR.close();
 
 const fV = gui.addFolder('View / tools');
-fV.add(state.view, 'heatmap').onChange((on) => model?.rig.setHeatmap(on));
+fV.add(state.view, 'heatmap').onChange(refreshHeatmap);
 fV.add(state.view, 'gizmo').onChange((on) => (gizmo.visible = on));
 fV.add(state.view, 'hud').onChange(renderHud);
+fV.add(state.view, 'metrics').name('morphometrics HUD');
+fV.add(state.view, 'selection', ['outer', 'skin', 'all']).name('measure surface').onChange((s) => { if (model?.rig?.field) model.rig.prepareMetrics(s); renderHud(); });
 const views = { front: () => setView('front'), side: () => setView('side'), threeQuarter: () => setView('threeQuarter'), closeFront: () => setView('closeFront') };
 for (const k of Object.keys(views)) fV.add(views, k);
 fV.add({ validate: runValidation }, 'validate').name('run validation');
@@ -383,7 +583,7 @@ function exportParams() {
   const data = {
     format: 'bust-morph-params/1',
     note: 'Lengths in S = distance between upper-arm joints. Body frame: right-handed, forward = cross(left, up).',
-    bones: Object.fromEntries(Object.entries(model.bones).map(([k, v]) => [k, v?.name ?? null])),
+    bones: Object.fromEntries(Object.entries(model?.bones ?? {}).map(([k, v]) => [k, v?.name ?? null])),
     params: state.params,
     sliders: state.sliders,
     dynamics: state.dyn,
@@ -393,10 +593,23 @@ function exportParams() {
   a.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
   a.download = 'bust-morph-params.json';
   a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 0);
 }
 
 // ---------------------------------------------------------------- files
 const fileInput = Object.assign(document.createElement('input'), { type: 'file', multiple: true, accept: '.vrm,.glb,.gltf,.fbx,.pmx,.pmd,.zip' });
+const paramsInput = Object.assign(document.createElement('input'), { type: 'file', accept: '.json' });
+paramsInput.onchange = async () => {
+  const f = paramsInput.files[0];
+  if (f) { try { importParams(await f.text(), f.name); activePreset = state.preset; } catch (e) { fail(e); } }
+  paramsInput.value = '';
+};
+const profileInput = Object.assign(document.createElement('input'), { type: 'file', accept: '.json' });
+profileInput.onchange = async () => {
+  const f = profileInput.files[0];
+  if (f) { try { await importProfile(await f.text()); } catch (e) { fail(e); } }
+  profileInput.value = '';
+};
 fileInput.onchange = () => openFiles(fileInput.files).catch(fail);
 const dirInput = Object.assign(document.createElement('input'), { type: 'file', webkitdirectory: true });
 dirInput.onchange = () => openFiles(dirInput.files).catch(fail);
@@ -435,6 +648,12 @@ function walkEntry(entry, prefix, out) {
 async function openFiles(fileList) {
   const files = [...fileList];
   if (!files.length) return;
+  if (files.length === 1 && /\.json$/i.test(files[0].name)) {
+    const data = JSON.parse(await files[0].text());
+    if (data.format === 'bust-character-profile/1') return importProfile(data);
+    importParams(data, files[0].name); activePreset = state.preset;
+    return;
+  }
   const zip = files.find((f) => /\.zip$/i.test(f.name));
   if (zip) return openEntries(entriesFromZip(await zip.arrayBuffer(), qs.get('zipEncoding') ?? 'shift_jis'), zip.name);
   if (files.length > 1 || files.some((f) => /\.(pmx|pmd)$/i.test(f.name))) return openEntries(entriesFromFileList(files), files[0].name);
@@ -454,35 +673,39 @@ function fail(err) {
 
 // ---------------------------------------------------------------- loop
 const clock = new THREE.Clock();
-let simTime = 0;
 let hudTimer = 0;
-function frame(dt) {
-  simTime += dt;
+function frame(dt, render = true) {
   if (model?.rig?.field) {
-    applyPose(simTime);
+    applyPose(dt);
     model.vrm?.update(dt);
     model.root.updateMatrixWorld(true);
     const f = model.restFrame;
-    const dyn = dynamics.update(dt, worldPos(model.bones.chest), f.up, f.S);
+    const chestRotation = model.bones.chest.getWorldQuaternion(new THREE.Quaternion()).multiply(model.rest.chestWorld.clone().invert());
+    const rotated = (a) => new THREE.Vector3(...a).applyQuaternion(chestRotation).toArray();
+    const chestPose = { pos: worldPos(model.bones.chest), left: rotated(f.left), up: rotated(f.up), forward: rotated(f.forward), S: f.S };
+    const dyn = state.tissue.enabled ? null : dynamics.update(dt, chestPose);
+    if (!state.tissue.enabled && tissue) releaseTissue();
     const b = model.bones;
     const pc = b.leftLowerArm && b.rightLowerArm
-      ? poseCorrective(worldPos(b.leftUpperArm), worldPos(b.leftLowerArm), worldPos(b.rightUpperArm), worldPos(b.rightLowerArm), f.up, state.pose)
+      ? poseCorrective(worldPos(b.leftUpperArm), worldPos(b.leftLowerArm), worldPos(b.rightUpperArm), worldPos(b.rightLowerArm), chestPose.up, state.pose)
       : { lift: 0, spread: 0 };
     model.poseInfo = pc;
-    model.weights = combineWeights(state.sliders, dyn, pc);
+    model.weights = bustWeights({ sliders: state.sliders, extras: dyn ? [dyn, pc] : [pc], envelope: activeEnvelope });
+    model.dynamicsStatus = dyn?.status ?? 'volumetric';
     model.rig.setWeights(model.weights);
+    if (state.tissue.enabled) ensureTissue().update(dt, chestPose, model.weights, state.tissue);
     // gizmo follows the chest
     gizmo.matrix.copy(model.bones.chest.matrixWorld).multiply(model.chestBindInv);
   }
   controls.update();
-  renderer.render(scene, camera);
+  if (render) renderer.render(scene, camera);
   hudTimer += dt;
   if (hudTimer > 0.25) {
     hudTimer = 0;
     renderHud();
   }
 }
-renderer.setAnimationLoop(() => frame(Math.min(clock.getDelta(), 0.05)));
+renderer.setAnimationLoop(() => frame(clock.getDelta()));
 
 // ---------------------------------------------------------------- test hook
 window.__bust = {
@@ -490,17 +713,29 @@ window.__bust = {
   open: (url) => open(url),
   setSliders: (s) => Object.assign(state.sliders, s),
   setParams: (fn) => { fn(state.params); rebake(); },
+  importParams: (p, name) => { const result = importParams(p, name); activePreset = state.preset; return result; },
+  selectPreset: (name) => { selectPreset(name); activePreset = state.preset; },
+  importProfile,
+  presets: () => [...presets.keys()],
   setAnim: (a) => Object.assign(state.anim, a),
-  setDyn: (d) => { Object.assign(state.dyn, d); Object.assign(dynamics.o, state.dyn); dynamics.reset(); },
+  resetMotion: () => { demoMotion.reset(); dynamics.reset(); tissue?.reset(); },
+  baselineDemo,
+  setDyn: (d) => { Object.assign(state.dyn, d); updateDynamics(); dynamics.reset(); },
+  setTissue: (t) => { Object.assign(state.tissue, t); if (t.enabled !== undefined) releaseTissue(); },
+  tissueReport: () => tissue?.report(),
   setView,
-  setHeatmap: (on) => { state.view.heatmap = on; model?.rig.setHeatmap(on); },
+  setHeatmap: (on) => { state.view.heatmap = on; refreshHeatmap(); },
+  setTissueCoverage: (on) => { state.view.tissueCoverage = on; refreshHeatmap(); },
   setGizmo: (on) => { state.view.gizmo = on; gizmo.visible = on; },
   setHud: (on) => { state.view.hud = on; renderHud(); },
   validate: () => runValidation(),
   exportBind: () => model?.rig?.exportBind(),
   report: () => report,
+  metrics: () => model?.rig?.morpho ? model.rig.measure(model.weights) : null,
+  weights: () => model?.weights,
+  runtime: () => ({ status: model?.dynamicsStatus, targets: model?.rig?.field?.targets, armDeg: model?.poseInfo?.armDeg, bodyBob: model?.motion?.bob }),
   // deterministic stepping for screenshots
-  step: (dt, n = 1) => { for (let i = 0; i < n; i++) frame(dt); },
+  step: (dt, n = 1, render = true) => { for (let i = 0; i < n; i++) frame(dt, render && i === n - 1); },
   pause: () => renderer.setAnimationLoop(null),
   ready: false,
 };

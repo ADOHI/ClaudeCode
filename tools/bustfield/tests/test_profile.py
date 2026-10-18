@@ -102,8 +102,10 @@ def test_profile_fit_custom_curve_cli(tmp_path, frame, synth):
     curve = tmp_path / "curve.json"
     curve.write_text(json.dumps({"ys": ys.tolist(), "zs": zs.tolist()}))
     out, rep = tmp_path / "p.json", tmp_path / "r.json"
-    PF.main(["--bind", str(path), "--layers", "*", "--curve", str(curve), "--y-lower", "-0.2", "--y-upper", "0.24", "--out", str(out), "--report", str(rep)])
+    code = PF.main(["--bind", str(path), "--layers", "*", "--curve", str(curve), "--y-lower", "-0.2", "--y-upper", "0.24", "--out", str(out), "--report", str(rep)])
     r = json.loads(rep.read_text())
+    assert code == (0 if r['gate']['passed'] else 1)
+    assert not r['gate']['passed']  # untouched hand-tuned targets fail this rig
     assert r["error"]["after_rms"] < 0.25 * r["error"]["before_rms"], r["error"]
     validate(json.loads(out.read_text()))
 

@@ -76,12 +76,12 @@ def det_rows(J0s, Jcols, targets, var_targets, combos, pairs):
         wt = slider_to_weights(**combos[c])
         F = np.eye(3)
         for t in targets:
-            if wt[t]:
+            if wt.get(t, 0):
                 F = F + wt[t] * J0s[t][i]
         det0[r] = m3det(F)
         cof = m3cof(F).reshape(9)
         g = cof @ Jcols[i]  # d det / d x_t per unit weight
         for vi, t in enumerate(var_targets):
-            if wt[t]:
+            if wt.get(t, 0):
                 rows[r, vi * K : (vi + 1) * K] = wt[t] * g
     return rows, det0

@@ -36,7 +36,12 @@ Coverage of the other test models:
   from 5.4 Hz; 183 s.
 - **Seed-san:** only the volume builds; no bake has been run.
 
-The exit code is 1 if any case fails to converge or inverts a tet.
+The exit code is 1 if any case fails to converge or inverts a tet, the inverse
+rest shape misses the configured `solver.inverseTol`, or the computed modal
+equilibrium is unstable. `meta.json` reports `inverse.converged` explicitly.
+When the inverse iteration budget runs out, the returned rest shape and
+equilibrium describe the same last solved state; the untested next iterate is
+never used for subsequent cases.
 
 Set `OMP_NUM_THREADS` / `OPENBLAS_NUM_THREADS` to share CPUs. The inverse rest shape
 depends only on the `gravity` and `nu` dials, plus the non-dial config. An optimizer can

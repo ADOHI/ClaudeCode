@@ -35,7 +35,7 @@
 
 import { sub, add, scale, dot, cross, normalize, length, clamp } from './vec.js';
 import { sliderToWeights, DEFAULT_PARAMS, cloneParams, linearBrush } from './field.js';
-import { grab, scaleBrush } from './kelvinlet.js';
+import { grab, scaleBrush, grabSmooth, scaleSmooth } from './kelvinlet.js';
 import { ModalSystem, pseudoModes, modeTargets, oscillatorStep, stepCoeffs } from './modal.js';
 import { DEFAULT_VSKIN, vskinWeights, vskinTargets } from './vskin.js';
 import { fieldCheck, extremeCombos } from './validate.js';
@@ -255,7 +255,7 @@ export class ChestTracker {
 
 // ---------------------------------------------------------------- dynamics
 
-const softClamp = (x, lim, soft) => (soft ? lim * Math.tanh(x / lim) : clamp(x, -lim, lim));
+const softClamp = (x, lim, soft) => (!(lim > 0) ? 0 : soft ? lim * Math.tanh(x / lim) : clamp(x, -lim, lim));
 
 export class BustDynamics {
   constructor(opts = {}) {
@@ -307,7 +307,13 @@ export class BustDynamics {
    */
   update(dt, chest, up, S) {
     const o = this.o;
-    if (!o.enabled) return this._zero();
+    if (!o.enabled) {
+      // The chest may continue moving while disabled. Its previous sample
+      // cannot be differentiated using the first re-enabled frame's dt.
+      if (this.status !== 'disabled') this.reset();
+      this.status = 'disabled';
+      return (this.out = this._zero());
+    }
     const pose = Array.isArray(chest) ? { pos: chest, up, S } : chest;
     const s = pose.S ?? S ?? o.S ?? 1;
     const ax = poseAxes(pose);
@@ -444,13 +450,13 @@ export function poseCorrective(shoulderL, elbowL, shoulderR, elbowR, up, opts = 
 // target at weight 1: its brushes evaluated at the apex. A cheap proxy of
 // where a shape moves the tissue, used by the clamping policy below (not by
 // the bake).
-export function apexDisplacement(ops) {
+export function apexDisplacement(ops, { kernel = 'kelvinlet' } = {}) {
   const out = { L: [0, 0, 0], R: [0, 0, 0] };
   for (const op of ops) {
     const r = op.at.map((v) => -v); // apex - at
     let u;
-    if (op.type === 'grab') u = grab(r, op.d, op.radius, op.nu ?? 0.45);
-    else if (op.type === 'scale') u = scaleBrush(r, op.k ?? 0, op.radius, op.nu ?? 0.45);
+    if (op.type === 'grab') u = kernel === 'smooth' ? grabSmooth(r, op.d, op.radius) : grab(r, op.d, op.radius, op.nu ?? 0.45);
+    else if (op.type === 'scale') u = kernel === 'smooth' ? scaleSmooth(r, op.k ?? 0, op.radius) : scaleBrush(r, op.k ?? 0, op.radius, op.nu ?? 0.45);
     else if (op.type === 'linear') u = linearBrush(r, op.A, op.radius ?? 0);
     else continue;
     out.L = add(out.L, u);
@@ -472,7 +478,7 @@ const AXES = [
  */
 export function dynamicEnvelope(params = DEFAULT_PARAMS, dynTargets = runtimeTargets(params)) {
   const disp = {};
-  for (const [k, ops] of Object.entries({ ...params.targets, ...dynTargets })) disp[k] = apexDisplacement(ops);
+  for (const [k, ops] of Object.entries({ ...params.targets, ...dynTargets })) disp[k] = apexDisplacement(ops, params);
   const bounds = AXES.map(({ axis, targets }) => {
     const v = targets.map((t) => disp[t]?.L[axis] ?? 0);
     return [Math.min(0, ...v), Math.max(0, ...v)];
