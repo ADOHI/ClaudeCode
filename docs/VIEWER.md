@@ -1,5 +1,16 @@
 # 뷰어 통합 (2026-10-18)
 
+현재 기본 동역학은 **3D soft tissue (research)**입니다. 실제 표면에 맞춘 깊이층
+체적 격자의 변형률과 부피를 풀고 피부·밀착 의상에 공통으로 전달합니다.
+`softness`, `settling / damping`, `motion exaggeration`으로 조절합니다.
+원래 모달 경로는 비교용으로 남겨 두었습니다. 구현·연구·남은 검증의 구분은
+[연조직 동작 v3](research/soft-tissue-motion-v3.md)를 참고하세요.
+
+`Test body motion`은 시험 입력입니다. 몸 운동 주기와 조직 복원 성질을 혼동하지 않도록
+분리했습니다. 시작·정지·진폭/속도 변경은 연속적으로 연결됩니다.
+`stop body / let settle`은 입력을 멈추고 잔향을 관찰하며, `reset response demo`는
+기본 시험 조건을 복원합니다. 전신 애니메이션 클립을 재생하는 기능은 아닙니다.
+
 ## 실행과 검증
 
 Node 22 이상에서 저장소의 `web/`을 작업 폴더로 사용합니다.
@@ -13,6 +24,15 @@ npm run test:viewer
 npm run build
 npm run dev
 ```
+
+3D 조직 브라우저 시험은 실행 중인 5173 서버와 로컬 모델을 사용합니다.
+
+```powershell
+npm run test:tissue-viewer -- /models/Michelle.glb .cache/tissue-check
+```
+
+rest 보존, 실제 표시 변형, 좌우별 체적 오차, tet와 전달 맵의 determinant,
+정지 후 감쇠, 체형별 rest 체적 재생성과 비교 모드 해제를 검사합니다.
 
 `test:viewer`는 자체 Vite 서버를 127.0.0.1:5178에서 실행하고 종료 시 정리합니다.
 기본값은 Michelle.glb와 Seed-san.vrm입니다. 실제로 모델을 로드한 뒤 params 전환,
@@ -49,6 +69,8 @@ npm run test:viewer -- --model /models/Changli/Changli.pmx --out .cache/changli-
 
 HUD는 250 ms 간격으로 현재 블렌드 가중치를 반영한 **바인드 공간 형상**을 측정합니다.
 같은 가중치의 결과는 캐시합니다. 자세와 중력으로 움직인 월드 좌표를 측정하지 않습니다.
+새 3D 조직의 실시간 정점 변위도 이 형태계측 캐시에 포함하지 않습니다.
+조직 체적·변형률·제한 여부는 별도의 `3D tissue` 진단을 봅니다.
 
 - `outer`: 피부와 착의 표면, 얼굴·머리카락·장신구 등 기본 제외
 - `skin`: 이름이 skin/body인 머티리얼 또는 프로필에서 지정한 피부
@@ -102,8 +124,9 @@ rightLowerArm이며, 값은 완전 일치하는 본 이름입니다. 존재하�
 슬라이더·포즈·동역학 가중치를 합칩니다. 전용 타깃은 음수 가중치도 사용합니다.
 모델/필드 변경 시 동역학을 초기화합니다. 계측은 이 전용 셰이프까지 반영합니다.
 
-진동은 여전히 pseudo-mode입니다. FEM `modes.npz`를 브라우저에서 직접 읽는 기능이나
-실제 FEM 모드 셰이프 증류는 이번 통합에 포함되지 않습니다. UI의 validation은 슬라이더
+비교용 기존 진동 경로는 여전히 pseudo-mode입니다. 기본 3D 조직 경로는 체적 proxy를
+직접 풀며, FEM `modes.npz`를 브라우저에서 읽거나 모드 셰이프로 증류하지 않습니다.
+UI의 validation은 슬라이더
 영역 검사이며 모든 동적 상태의 충돌 보증이 아닙니다. `combinationCheck`는 별도 오프라인
 분석 API입니다. 자세한 수식과 이식 규칙은 [METHOD.md](METHOD.md)를 참고합니다.
 

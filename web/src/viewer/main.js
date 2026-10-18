@@ -7,6 +7,9 @@ import { DEFAULT_PARAMS, cloneParams, buildBodyFrame } from '../core/field.js';
 import { BustDynamics, DEFAULT_DYNAMICS, DEFAULT_POSE, poseCorrective, bustWeights, withRuntimeTargets, dynamicEnvelope, runtimeTargets } from '../core/runtime.js';
 import { BANDS, scoreBands } from '../core/morpho.js';
 import { parseParams, applyParams, parseProfile } from './config.js';
+import { DemoMotion } from './motion.js';
+import { TissueRig } from './tissue-rig.js';
+import { sliderToWeights } from '../core/field.js';
 
 const qs = new URLSearchParams(location.search);
 const DEFAULT_MODEL = qs.get('model') ?? `${import.meta.env.BASE_URL}models/Seed-san.vrm`;
@@ -16,6 +19,7 @@ const state = {
   sliders: { size: 0, style: 0.5, lift: 0, spread: 0 },
   params: cloneParams(DEFAULT_PARAMS),
   dyn: { ...DEFAULT_DYNAMICS, mapping: 'dedicated', vskin: { ...DEFAULT_DYNAMICS.vskin } },
+  tissue: { enabled: true, softness: 0.8, damping: 3.5, exaggeration: 1.3, iterations: 3 },
   pose: { ...DEFAULT_POSE },
   anim: { play: false, armDown: 65, bob: 0.035, bobHz: 1.8, armCycle: false },
   view: { heatmap: false, gizmo: false, hud: qs.get('hud') !== '0', autoFit: true, metrics: true, selection: 'outer' },
@@ -64,8 +68,10 @@ addEventListener('resize', () => {
 
 // ---------------------------------------------------------------- model
 let model = null; // { root, vrm, name, rig, bones, restFrame, rest }
+let tissue = null, tissueKey = null;
 let report = null;
 const dynamics = new BustDynamics(state.dyn);
+const demoMotion = new DemoMotion();
 const hud = document.getElementById('hud');
 const statusEl = document.getElementById('status');
 
@@ -74,6 +80,7 @@ function worldPos(o) {
 }
 
 async function open(source) {
+  releaseTissue();
   statusEl.textContent = 'loading…';
   if (model) {
     scene.remove(model.root);
@@ -109,6 +116,7 @@ async function open(source) {
   });
   model.chestBindInv = new THREE.Matrix4();
   setupPosing();
+  demoMotion.reset();
   rig.prepare(state.params.mask);
   // Imported fields are already fitted to their source character. Never move
   // their anchors silently; only the hand-tuned baseline is auto-fitted.
@@ -140,6 +148,7 @@ function autoFit(doBake = true) {
 
 function rebake() {
   if (!model?.rig?.frame) return;
+  releaseTissue();
   updateDynamics();
   dynamics.reset();
   activeEnvelope = dynamicEnvelope(state.params, runtimeTargets(state.params));
@@ -153,6 +162,25 @@ function rebake() {
 
 function updateDynamics() {
   Object.assign(dynamics.o, state.dyn, { params: state.params, restAxes: model?.restFrame ?? null });
+}
+
+function releaseTissue() {
+  tissue?.dispose();
+  tissue = null; tissueKey = null;
+}
+
+function prepareRig() {
+  releaseTissue();
+  model.rig.prepare(state.params.mask);
+}
+
+function ensureTissue() {
+  const key = JSON.stringify(state.sliders);
+  if (tissue && tissueKey === key) return tissue;
+  releaseTissue();
+  tissue = new TissueRig(model.rig, sliderToWeights(state.sliders), model.restFrame, state.tissue);
+  tissueKey = key;
+  return tissue;
 }
 
 function applyProfileRegion() {
@@ -173,7 +201,7 @@ function selectPreset(name) {
   presets.set(state.preset, cloneParams(state.params));
   applyParams(state.params, presets.get(name));
   state.preset = name;
-  if (model?.rig?.frame) model.rig.prepare(state.params.mask);
+  if (model?.rig?.frame) prepareRig();
   rebake();
   syncPresetOptions();
 }
@@ -185,7 +213,7 @@ function importParams(input, name = 'Imported params') {
   presets.set(name, params);
   applyParams(state.params, params);
   state.preset = name;
-  if (model?.rig?.frame) model.rig.prepare(state.params.mask);
+  if (model?.rig?.frame) prepareRig();
   rebake();
   syncPresetOptions();
   return params;
@@ -217,7 +245,8 @@ async function importProfile(input) {
     if (missing.length) throw new Error(`Profile missing bones: ${missing.join(', ')}`);
     model.restFrame = buildBodyFrame(Object.fromEntries(['hips', 'chest', 'neck', 'leftUpperArm', 'rightUpperArm'].map((k) => [k, worldPos(model.bones[k])])));
     setupPosing();
-    model.rig.prepare(state.params.mask);
+    demoMotion.reset();
+    prepareRig();
     rebake();
   }
   gui.controllersRecursive().forEach((c) => c.updateDisplay());
@@ -279,14 +308,11 @@ function rotateAboutWorldAxis(bone, restLocal, axis, angle) {
   bone.quaternion.copy(_pq).invert().multiply(_q).multiply(_pq).multiply(restLocal);
 }
 
-function applyPose(t) {
+function applyPose(dt) {
   const f = model.restFrame;
-  const { anim } = state;
-  let down = anim.armDown;
-  if (anim.play && anim.armCycle) {
-    const s = 0.5 - 0.5 * Math.cos(2 * Math.PI * 0.18 * t);
-    down = THREE.MathUtils.lerp(anim.armDown, -80, s);
-  }
+  const motion = demoMotion.update(dt, state.anim);
+  model.motion = motion;
+  const down = motion.armDown;
   // `down` is measured from the T-pose: target elevation = 90 - down.
   const target = 90 - down;
   const aL = THREE.MathUtils.degToRad(model.rest.luaDeg - target);
@@ -295,9 +321,8 @@ function applyPose(t) {
   rotateAboutWorldAxis(model.pose.rua, model.rest.rua, f.forward, aR);
   const hips = model.pose.mover;
   hips.position.copy(model.rest.moverPos);
-  if (anim.play && anim.bob > 0) {
-    // bouncy "walk" bob: |sin| gives a sharp contact each step
-    const y = (Math.abs(Math.sin(Math.PI * anim.bobHz * t)) - 0.6) * anim.bob * f.S;
+  if (motion.bob !== 0) {
+    const y = motion.bob * f.S;
     const up = _v.fromArray(f.up).multiplyScalar(y);
     hips.parent.updateWorldMatrix(true, false);
     const inv = new THREE.Matrix3().setFromMatrix4(hips.parent.matrixWorld).invert();
@@ -441,6 +466,16 @@ function renderHud() {
     }
   }
   if (model.weights) {
+    L.push(state.tissue.enabled ? `<b>3D tissue</b> body ${fmt(state.anim.bobHz, 1)} Hz | softness ${fmt(state.tissue.softness, 2)} | damping ${fmt(state.tissue.damping, 1)}`
+      : `<b>legacy response</b> body ${fmt(state.anim.bobHz, 1)} Hz | spring ${fmt(state.dyn.frequency, 1)} Hz | damping ${fmt(state.dyn.damping, 2)}`);
+    if (tissue) {
+      const s = tissue.report();
+      L.push(`volume max ${fmt(Math.max(...s.zoneVolumeErrors.map(Math.abs)) * 100, 2)}% | min det ${fmt(s.minDet)} | strain ${fmt(s.maxStrain * 100, 1)}%`);
+      L.push(`${s.nodeCount} nodes / ${s.tetCount} tets | ${s.mappedVertices} mapped verts | ${fmt(s.ms, 1)} ms`);
+      if (s.safetyClamps || s.normalGuards) L.push(`<span class=warn>limited steps ${s.safetyClamps} | normal guards ${s.normalGuards}</span>`);
+      if (s.transferScale < 0.999) L.push(`<span class=warn>display deformation limited to ${fmt(s.transferScale * 100, 0)}%</span>`);
+      if (s.resetCount) L.push(`motion resets ${s.resetCount} | last: ${esc(s.lastReset)}`);
+    }
     L.push('<b>weights</b>');
     L.push(Object.entries(model.weights).filter(([, w]) => Math.abs(w) > 0.001).map(([k, w]) => `${esc(k)}=${fmt(w, 2)}`).join('  ') || '(all 0)');
   }
@@ -467,19 +502,43 @@ fS.add(state.sliders, 'style', 0, 1, 0.01).name('style natural→stylized');
 fS.add(state.sliders, 'lift', -1, 1, 0.01).name('lift');
 fS.add(state.sliders, 'spread', -1, 1, 0.01).name('spread in/out');
 
-const fA = gui.addFolder('Animation / runtime');
-fA.add(state.anim, 'play');
-fA.add(state.anim, 'armDown', -80, 85, 1).name('arm down (deg)');
-fA.add(state.anim, 'armCycle').name('arm raise cycle');
-fA.add(state.anim, 'bob', 0, 0.1, 0.001).name('body bob (S)');
-fA.add(state.anim, 'bobHz', 0.5, 4, 0.1);
+const fM = gui.addFolder('Test body motion');
+fM.add(state.anim, 'play').name('play body motion');
+fM.add(state.anim, 'armDown', -80, 85, 1).name('arm down (deg)');
+fM.add(state.anim, 'armCycle').name('arm raise cycle');
+fM.add(state.anim, 'bob', 0, 0.1, 0.001).name('body amplitude (S)');
+fM.add(state.anim, 'bobHz', 0.5, 4, 0.1).name('body cycles (Hz)');
+fM.add({ stop: () => { state.anim.play = false; gui.controllersRecursive().forEach(c => c.updateDisplay()); } }, 'stop').name('stop body / let settle');
+fM.add({ baselineDemo }, 'baselineDemo').name('reset response demo');
+const fA = gui.addFolder('Bust response');
+const fT = gui.addFolder('3D soft tissue (research)');
+fT.add(state.tissue, 'enabled').name('volumetric tissue').onChange(() => { releaseTissue(); dynamics.reset(); });
+fT.add(state.tissue, 'softness', 0, 1, 0.01).name('softness');
+fT.add(state.tissue, 'damping', 0.5, 10, 0.1).name('settling / damping');
+fT.add(state.tissue, 'exaggeration', 0, 3, 0.01).name('motion exaggeration');
+fT.add({ reset: () => tissue?.reset() }, 'reset').name('reset tissue motion');
 fA.add(state.dyn, 'enabled').name('jiggle (bone-free)').onChange(updateDynamics);
-for (const [k, lo, hi] of [['frequency', 0.5, 6], ['damping', 0.02, 1], ['gain', 0, 3]]) {
-  fA.add(state.dyn, k, lo, hi, 0.01).onChange(updateDynamics);
+for (const [k, name, lo, hi] of [['frequency', 'spring frequency (Hz)', 0.5, 6], ['damping', 'damping', 0.02, 1], ['gain', 'motion exaggeration', 0, 3]]) {
+  const c = fA.add(state.dyn, k, lo, hi, 0.01).name(name).onChange(updateDynamics);
+  c.domElement.title = k === 'frequency' ? '복원 진동수입니다. 몸의 애니메이션 속도와 별도 설정입니다.' : k === 'damping' ? '높을수록 잔진동이 빨리 가라앉습니다.' : '몸의 가속도에 대한 반응을 증폭합니다.';
 }
 fA.add(state.dyn.vskin, 'enabled').name('velocity shapes');
 fA.add(state.pose, 'enabled').name('pose corrective');
 fA.add(state.pose, 'lift', 0, 1, 0.01).name('arm-raise lift');
+fA.add({ reset: () => dynamics.reset() }, 'reset').name('clear residual wobble');
+fA.close();
+
+function baselineDemo() {
+  Object.assign(state.anim, { play: true, bob: 0.035, bobHz: 1.8, armDown: 65, armCycle: false });
+  Object.assign(state.dyn, { enabled: true, frequency: 2.4, damping: 0.3, gain: 1 });
+  Object.assign(state.tissue, { softness: 0.8, damping: 3.5, exaggeration: 1.3 });
+  releaseTissue();
+  state.dyn.vskin.enabled = false; // isolate the spring response from art distortions
+  demoMotion.reset();
+  updateDynamics();
+  dynamics.reset();
+  gui.controllersRecursive().forEach(c => c.updateDisplay());
+}
 
 const fR = gui.addFolder('Region / kernel (rebake)');
 fR.add(state.params, 'kernel', ['kelvinlet', 'smooth']).onChange(rebake);
@@ -490,8 +549,8 @@ fR.add(state.params, 'depth', 0.05, 0.4, 0.005).onFinishChange(rebake);
 for (const k of ['x', 'yUp', 'yDown', 'zFront', 'zBack', 'hardness', 'hardnessZ']) {
   fR.add(state.params.window, k, k.startsWith('hard') ? 0 : 0.005, k.startsWith('hard') ? 0.95 : 1.5, 0.005).name(`window ${k}`).onFinishChange(rebake);
 }
-fR.add(state.params.mask, 'excludeArms').onChange(() => { model?.rig.prepare(state.params.mask); rebake(); });
-fR.add(state.params.mask, 'excludeHead').onChange(() => { model?.rig.prepare(state.params.mask); rebake(); });
+fR.add(state.params.mask, 'excludeArms').onChange(() => { if (model) prepareRig(); rebake(); });
+fR.add(state.params.mask, 'excludeHead').onChange(() => { if (model) prepareRig(); rebake(); });
 fR.add({ autoFit: () => autoFit(true) }, 'autoFit').name('auto-fit anchors');
 fR.close();
 
@@ -602,32 +661,32 @@ function fail(err) {
 
 // ---------------------------------------------------------------- loop
 const clock = new THREE.Clock();
-let simTime = 0;
 let hudTimer = 0;
-function frame(dt) {
-  simTime += dt;
+function frame(dt, render = true) {
   if (model?.rig?.field) {
-    applyPose(simTime);
+    applyPose(dt);
     model.vrm?.update(dt);
     model.root.updateMatrixWorld(true);
     const f = model.restFrame;
     const chestRotation = model.bones.chest.getWorldQuaternion(new THREE.Quaternion()).multiply(model.rest.chestWorld.clone().invert());
     const rotated = (a) => new THREE.Vector3(...a).applyQuaternion(chestRotation).toArray();
     const chestPose = { pos: worldPos(model.bones.chest), left: rotated(f.left), up: rotated(f.up), forward: rotated(f.forward), S: f.S };
-    const dyn = dynamics.update(dt, chestPose);
+    const dyn = state.tissue.enabled ? null : dynamics.update(dt, chestPose);
+    if (!state.tissue.enabled && tissue) releaseTissue();
     const b = model.bones;
     const pc = b.leftLowerArm && b.rightLowerArm
       ? poseCorrective(worldPos(b.leftUpperArm), worldPos(b.leftLowerArm), worldPos(b.rightUpperArm), worldPos(b.rightLowerArm), chestPose.up, state.pose)
       : { lift: 0, spread: 0 };
     model.poseInfo = pc;
-    model.weights = bustWeights({ sliders: state.sliders, extras: [dyn, pc], envelope: activeEnvelope });
-    model.dynamicsStatus = dyn.status;
+    model.weights = bustWeights({ sliders: state.sliders, extras: dyn ? [dyn, pc] : [pc], envelope: activeEnvelope });
+    model.dynamicsStatus = dyn?.status ?? 'volumetric';
     model.rig.setWeights(model.weights);
+    if (state.tissue.enabled) ensureTissue().update(dt, chestPose, model.weights, state.tissue);
     // gizmo follows the chest
     gizmo.matrix.copy(model.bones.chest.matrixWorld).multiply(model.chestBindInv);
   }
   controls.update();
-  renderer.render(scene, camera);
+  if (render) renderer.render(scene, camera);
   hudTimer += dt;
   if (hudTimer > 0.25) {
     hudTimer = 0;
@@ -647,7 +706,11 @@ window.__bust = {
   importProfile,
   presets: () => [...presets.keys()],
   setAnim: (a) => Object.assign(state.anim, a),
+  resetMotion: () => { demoMotion.reset(); dynamics.reset(); tissue?.reset(); },
+  baselineDemo,
   setDyn: (d) => { Object.assign(state.dyn, d); updateDynamics(); dynamics.reset(); },
+  setTissue: (t) => { Object.assign(state.tissue, t); if (t.enabled !== undefined) releaseTissue(); },
+  tissueReport: () => tissue?.report(),
   setView,
   setHeatmap: (on) => { state.view.heatmap = on; model?.rig.setHeatmap(on); },
   setGizmo: (on) => { state.view.gizmo = on; gizmo.visible = on; },
@@ -657,9 +720,9 @@ window.__bust = {
   report: () => report,
   metrics: () => model?.rig?.morpho ? model.rig.measure(model.weights) : null,
   weights: () => model?.weights,
-  runtime: () => ({ status: model?.dynamicsStatus, targets: model?.rig?.field?.targets, armDeg: model?.poseInfo?.armDeg }),
+  runtime: () => ({ status: model?.dynamicsStatus, targets: model?.rig?.field?.targets, armDeg: model?.poseInfo?.armDeg, bodyBob: model?.motion?.bob }),
   // deterministic stepping for screenshots
-  step: (dt, n = 1) => { for (let i = 0; i < n; i++) frame(dt); },
+  step: (dt, n = 1) => { for (let i = 0; i < n; i++) frame(dt, i === n - 1); },
   pause: () => renderer.setAnimationLoop(null),
   ready: false,
 };

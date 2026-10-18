@@ -12,7 +12,8 @@
     "fetch-model": "node scripts/fetch-model.mjs",
     "shoot": "node scripts/shoot.mjs",
     "golden": "node scripts/gen-golden.mjs",
-    "test:viewer": "node scripts/check-viewer.mjs"
+    "test:viewer": "node scripts/check-viewer.mjs",
+    "test:tissue-viewer": "node scripts/check-tissue.mjs"
   },
   "dependencies": {
     "@moeru/three-mmd": "0.1.2",

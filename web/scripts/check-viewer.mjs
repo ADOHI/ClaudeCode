@@ -37,7 +37,7 @@ try {
     await page.waitForFunction(() => window.__bust?.ready, null, { timeout: 180000 });
     const result = await page.evaluate(async () => {
       const lab = window.__bust;
-      lab.pause(); lab.setDyn({ enabled: false }); lab.setAnim({ play: false });
+      lab.pause(); lab.setTissue({ enabled: false }); lab.setDyn({ enabled: false }); lab.setAnim({ play: false });
       const baseline = JSON.parse(JSON.stringify(lab.state.params));
       lab.setSliders({ size: 0.8, style: 0.4, lift: 0.2 }); lab.step(1 / 60);
       const initial = lab.exportBind();
@@ -68,7 +68,20 @@ try {
       const hitchWeights = lab.weights();
       const metrics = lab.metrics();
       const bind = lab.exportBind();
+      lab.baselineDemo();
+      lab.step(1 / 60, 300);
+      const beforeRateEdit = lab.runtime().bodyBob;
+      lab.setAnim({ bobHz: 4 }); lab.step(1e-6);
+      const afterRateEdit = lab.runtime().bodyBob;
+      const beforeStop = afterRateEdit;
+      lab.setAnim({ play: false }); lab.step(1e-6);
+      const afterStop = lab.runtime().bodyBob;
+      lab.step(1 / 60, 360);
+      const settledBody = lab.runtime().bodyBob;
+      const settledDynamic = Math.max(0, ...Object.entries(lab.weights()).filter(([k]) => k.startsWith('bust_dyn_')).map(([, w]) => Math.abs(w)));
+      lab.baselineDemo(); lab.step(1 / 60, 90);
       return { restored, selectedAgain, rejectedSafely, fittedAnchor, finalAnchor: lab.state.params.anchor.x, armsDown, armsRaised,
+        rateEditJump: Math.abs(afterRateEdit - beforeRateEdit), stopJump: Math.abs(afterStop - beforeStop), settledBody, settledDynamic,
         importedWeights, activeWeights, hitchWeights, runtime: lab.runtime(), metricsOk: !!metrics?.sides?.length,
         touched: lab.report().bake.touched, meshes: bind.meshes.length,
         targets: Object.keys(bind.params.targets), hud: document.getElementById('hud').textContent };
@@ -84,11 +97,13 @@ try {
     assert.ok(Object.entries(result.activeWeights).some(([k, w]) => k.startsWith('bust_dyn_') && Math.abs(w) > 1e-5), 'dedicated dynamic shapes driven');
     assert.ok(Object.values(result.hitchWeights).every(Number.isFinite), 'hitch produces finite weights');
     assert.equal(result.importedWeights.bust_size_up_natural, 0.48);
+    assert.ok(result.rateEditJump < 1e-5 && result.stopJump < 1e-5, 'source rate edits/stopping preserve body position');
+    assert.ok(Math.abs(result.settledBody) < 1e-10 && result.settledDynamic < 1e-4, 'stationary body allows bust response to settle');
     assert.deepEqual(errors, [], 'no browser exceptions');
     const label = path.basename(model).replace(/\.[^.]+$/, '');
     await page.screenshot({ path: path.join(out, `${label}.png`) });
     fs.writeFileSync(path.join(out, `${label}.json`), JSON.stringify(result, null, 2));
-    console.log(`${model}: A/B, invalid import, profile, ${result.targets.length} targets, metrics, dynamics + hitch passed (${result.touched} vertices)`);
+    console.log(`${model}: A/B, profile, ${result.targets.length} targets, metrics, dynamics/hitch, continuous motion edits + settling passed (${result.touched} vertices)`);
     await page.close();
   }
 } finally {

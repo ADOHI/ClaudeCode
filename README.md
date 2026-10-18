@@ -4,8 +4,9 @@
 최종 파이프라인은 **Blender 셰이프 키 → FBX → Unity 블렌드 셰이프**이며, 여기서는 그 앞단의 알고리즘과 검증 도구를 다룹니다.
 
 > 상태: 연구용 프로토타입 (비공개 테스트). **로컬에서 이어서 작업하려면 [docs/HANDOFF.md](docs/HANDOFF.md)부터 읽으세요.**
-> 구조: 최신 기법 teacher(FEM 준정적 해석, dARAP, 프로파일 곡선)가 형상을 만들고, 바인드 공간 Kelvinlet 필드(student)로 증류해 블렌드 셰이프로 굽습니다.
-> 근거는 [docs/research/decision-v2.md](docs/research/decision-v2.md), 결정 사항은 [docs/DECISIONS.md](docs/DECISIONS.md).
+> 현재 뷰어: 정적 체형 모프 + **깊이층을 가진 3D 체적 연조직 동역학**. 실제 흉부 가속·회전으로 구동하며 피부·밀착 의상에 공통 변형을 전달합니다.
+> 형상 생성/증류 경로: FEM 준정적 teacher와 바인드 공간 Kelvinlet 필드. dARAP 등은 미완성 후보이며, 새 동역학의 Unity 이식은 아직 남아 있습니다.
+> 동작 연구와 구현 상태는 [연조직 v3](docs/research/soft-tissue-motion-v3.md), 이전 결정은 [decision-v2](docs/research/decision-v2.md)를 참고하세요.
 
 ## 구조
 
@@ -17,7 +18,9 @@ web/
     bake.js        정점별 위치/노멀 델타 굽기 (노멀은 F^-T 해석적 변환)
     validate.js    단사성 det(I+J)>0, 이음새 일치, 삼각형 뒤집힘, 노멀 정확도
     autofit.js     높이맵 래스터화 + erosion으로 가슴 정점 자동 탐지
-    runtime.js     본 없는 지글(감쇠 스프링 + squash&stretch), 팔 들기 포즈 보정
+    runtime.js     실제 흉부 움직임 추적, 비교용 모달 동역학, 팔 들기 포즈 보정
+    tissue.js      분포 tet XPBD: Green strain, 요소/구역 체적, 관성, 감쇠, 안전 제한
+    tissue-proxy.js 정적 체형에 맞춘 체적 격자와 공통 표면 embedding
   src/viewer/      three.js 뷰어 (VRM/GLB/FBX 로드, 슬라이더, 히트맵, 검증 HUD)
     morpho.js      형태계측 (상:하 볼륨비, 정점 각도, IMF 높이 등)
     modal.js       정확 이산화 모달 지글
@@ -34,8 +37,9 @@ wip/phase1/        중단된 작업의 부분 코드 (미검증)
 
 ## 실행
 
-2026-10-18 뷰어 통합: params JSON A/B 불러오기, 캐릭터 프로필, 형태계측 HUD와 전용
-지글 셰이프를 연결했습니다. 사용법·검증·현재 한계는 [docs/VIEWER.md](docs/VIEWER.md),
+2026-10-18 뷰어 통합: params JSON A/B, 캐릭터 프로필, 형태계측 HUD에 이어
+240노드/720tet의 3D 연조직 경로를 기본으로 연결했습니다. 크기 변경 시 rest 체적과
+질량을 재생성합니다. 사용법·검증·현재 한계는 [docs/VIEWER.md](docs/VIEWER.md),
 이식 수식과 golden 데이터는 [docs/METHOD.md](docs/METHOD.md)를 참고하세요.
 
 ```bash
@@ -65,7 +69,7 @@ PMX는 `@moeru/three-mmd`로 읽습니다 (three r172에서 공식 MMDLoader가 
 - 텍스처가 별도 파일이므로 **폴더째 드래그&드롭**하거나, zip을 드롭하거나, `load PMX folder…` 버튼을 쓰세요.
   (zip 파일명 인코딩 기본값은 Shift_JIS, 중국어 배포본은 `?zipEncoding=gbk`)
 - `public/models/<이름>/` 아래에 두면 `?model=/models/<이름>/<파일>.pmx`로도 열립니다.
-- PMX 표정 모프는 밀집 절대좌표로 들어와 메모리를 많이 써서 기본적으로 제거합니다 (`?keepMorphs=1`로 유지).
+- PMX 표정 모프는 밀집 절대좌표로 들어와 메모리를 많이 써서 기본적으로 제거합니다 (`?keepMorphs=1`로 유지). 유지된 절대 모프는 리그 준비 시 상대 델타로 변환해 기존 가중치를 보존하고 실시간 조직 변형과 합성합니다.
 - MMD 단위(약 8cm)는 0.08배로 미터에 맞춥니다.
 
 **명조(鸣潮) 공식 MMD 모델 주의사항**: 공식 배포처는 aplaybox(`https://www.aplaybox.com/u/811099367`)입니다.

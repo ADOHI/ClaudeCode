@@ -10,6 +10,7 @@ import { m4Point, m4Linear, m3Vec, m3Inverse } from '../core/vec.js';
 import { meshBindData, boneBindPosition } from './model.js';
 import { prepareMorpho, measurePrepared, selectTriangles, SKIN_MATERIALS, NON_TORSO_MATERIALS } from '../core/morpho.js';
 import { materialRule } from './config.js';
+import { makeMorphsRelative } from './morphs.js';
 
 export class BustRig {
   constructor({ root, vrm, meshes, bones, profile = null }) {
@@ -45,6 +46,7 @@ export class BustRig {
       if (seen.has(mesh.geometry.uuid)) continue; // shared geometry: bake once
       seen.add(mesh.geometry.uuid);
       if (!mesh.isSkinnedMesh) continue; // Unity: only SkinnedMeshRenderer has blend shapes
+      makeMorphsRelative(mesh.geometry);
       const d = meshBindData(mesh, this.bones, maskOpts);
       d.mask = d.excluded && d.skinIndex ? computeMask(d.skinIndex, d.skinWeight, d.skinItemSize, d.positions.length / 3, d.excluded) : null;
       const n = d.positions.length / 3;
