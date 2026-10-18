@@ -19,10 +19,10 @@ const state = {
   sliders: { size: 0, style: 0.5, lift: 0, spread: 0 },
   params: cloneParams(DEFAULT_PARAMS),
   dyn: { ...DEFAULT_DYNAMICS, mapping: 'dedicated', vskin: { ...DEFAULT_DYNAMICS.vskin } },
-  tissue: { enabled: true, softness: 0.8, damping: 3.5, exaggeration: 1.3, iterations: 3 },
+  tissue: { enabled: true, softness: 0.8, damping: 3.5, exaggeration: 1.3, iterations: 3, coverage: 1.18, wallInset: 0.04 },
   pose: { ...DEFAULT_POSE },
   anim: { play: false, armDown: 65, bob: 0.035, bobHz: 1.8, armCycle: false },
-  view: { heatmap: false, gizmo: false, hud: qs.get('hud') !== '0', autoFit: true, metrics: true, selection: 'outer' },
+  view: { heatmap: false, tissueCoverage: false, gizmo: false, hud: qs.get('hud') !== '0', autoFit: true, metrics: true, selection: 'outer' },
   preset: 'Hand tuned',
   profile: null,
 };
@@ -175,12 +175,19 @@ function prepareRig() {
 }
 
 function ensureTissue() {
-  const key = JSON.stringify(state.sliders);
+  const key = JSON.stringify([state.sliders, state.tissue.coverage, state.tissue.wallInset]);
   if (tissue && tissueKey === key) return tissue;
   releaseTissue();
   tissue = new TissueRig(model.rig, sliderToWeights(state.sliders), model.restFrame, state.tissue);
   tissueKey = key;
+  if (state.view.tissueCoverage) model.rig.setHeatmap(true, tissue.coverage());
   return tissue;
+}
+
+function refreshHeatmap() {
+  if (!model) return;
+  const coverage = state.view.tissueCoverage && state.tissue.enabled ? ensureTissue().coverage() : null;
+  model.rig.setHeatmap(state.view.heatmap || !!coverage, coverage);
 }
 
 function applyProfileRegion() {
@@ -472,6 +479,8 @@ function renderHud() {
       const s = tissue.report();
       L.push(`volume max ${fmt(Math.max(...s.zoneVolumeErrors.map(Math.abs)) * 100, 2)}% | min det ${fmt(s.minDet)} | strain ${fmt(s.maxStrain * 100, 1)}%`);
       L.push(`${s.nodeCount} nodes / ${s.tetCount} tets | ${s.mappedVertices} mapped verts | ${fmt(s.ms, 1)} ms`);
+      L.push(`region: ${s.proxy.region.map(r => r.method).join(' / ')} | collar ${fmt(s.proxy.coverage, 2)}×`);
+      if (state.view.tissueCoverage) L.push('moving region: red = free, blue = attached / outside');
       if (s.safetyClamps || s.normalGuards) L.push(`<span class=warn>limited steps ${s.safetyClamps} | normal guards ${s.normalGuards}</span>`);
       if (s.transferScale < 0.999) L.push(`<span class=warn>display deformation limited to ${fmt(s.transferScale * 100, 0)}%</span>`);
       if (s.resetCount) L.push(`motion resets ${s.resetCount} | last: ${esc(s.lastReset)}`);
@@ -512,7 +521,10 @@ fM.add({ stop: () => { state.anim.play = false; gui.controllersRecursive().forEa
 fM.add({ baselineDemo }, 'baselineDemo').name('reset response demo');
 const fA = gui.addFolder('Bust response');
 const fT = gui.addFolder('3D soft tissue (research)');
-fT.add(state.tissue, 'enabled').name('volumetric tissue').onChange(() => { releaseTissue(); dynamics.reset(); });
+fT.add(state.tissue, 'enabled').name('volumetric tissue').onChange(() => { releaseTissue(); dynamics.reset(); refreshHeatmap(); });
+fT.add(state.view, 'tissueCoverage').name('show moving region').onChange(refreshHeatmap);
+fT.add(state.tissue, 'coverage', 1, 1.5, 0.01).name('region coverage').onFinishChange(() => { releaseTissue(); refreshHeatmap(); });
+fT.add(state.tissue, 'wallInset', 0, 0.12, 0.005).name('base depth margin (S)').onFinishChange(() => { releaseTissue(); refreshHeatmap(); });
 fT.add(state.tissue, 'softness', 0, 1, 0.01).name('softness');
 fT.add(state.tissue, 'damping', 0.5, 10, 0.1).name('settling / damping');
 fT.add(state.tissue, 'exaggeration', 0, 3, 0.01).name('motion exaggeration');
@@ -555,7 +567,7 @@ fR.add({ autoFit: () => autoFit(true) }, 'autoFit').name('auto-fit anchors');
 fR.close();
 
 const fV = gui.addFolder('View / tools');
-fV.add(state.view, 'heatmap').onChange((on) => model?.rig.setHeatmap(on));
+fV.add(state.view, 'heatmap').onChange(refreshHeatmap);
 fV.add(state.view, 'gizmo').onChange((on) => (gizmo.visible = on));
 fV.add(state.view, 'hud').onChange(renderHud);
 fV.add(state.view, 'metrics').name('morphometrics HUD');
@@ -712,7 +724,8 @@ window.__bust = {
   setTissue: (t) => { Object.assign(state.tissue, t); if (t.enabled !== undefined) releaseTissue(); },
   tissueReport: () => tissue?.report(),
   setView,
-  setHeatmap: (on) => { state.view.heatmap = on; model?.rig.setHeatmap(on); },
+  setHeatmap: (on) => { state.view.heatmap = on; refreshHeatmap(); },
+  setTissueCoverage: (on) => { state.view.tissueCoverage = on; refreshHeatmap(); },
   setGizmo: (on) => { state.view.gizmo = on; gizmo.visible = on; },
   setHud: (on) => { state.view.hud = on; renderHud(); },
   validate: () => runValidation(),

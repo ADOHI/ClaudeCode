@@ -237,7 +237,7 @@ export class BustRig {
     return { field, mesh, normals, ms: performance.now() - t0 };
   }
 
-  setHeatmap(on) {
+  setHeatmap(on, coverage = null) {
     this.heat = on;
     for (const e of this.entries) {
       const m = e.mesh;
@@ -248,7 +248,7 @@ export class BustRig {
         const c = new THREE.Color();
         for (let v = 0; v < n; v++) {
           const p = [e.posBind[v * 3], e.posBind[v * 3 + 1], e.posBind[v * 3 + 2]];
-          const w = (this.field ? this.field.weight(p) : 0) * (e.mask ? e.mask[v] : 1);
+          const w = coverage ? coverage.get(m)?.[v] ?? 0 : (this.field ? this.field.weight(p) : 0) * (e.mask ? e.mask[v] : 1);
           c.setHSL(0.66 * (1 - w), 0.9, w > 0 ? 0.5 : 0.25);
           col.set([c.r, c.g, c.b], v * 3);
         }

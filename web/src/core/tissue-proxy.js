@@ -14,6 +14,11 @@ const smooth = (v) => {
   return t * t * t * (t * (t * 6 - 15) + 10);
 };
 
+function radial(side, x, y) {
+  const du = side.sign * x - side.centerU, dy = y - side.cy;
+  return Math.hypot(du / (du >= 0 ? side.rxOut : side.rxIn), dy / (dy >= 0 ? side.ryUp : side.ryDown));
+}
+
 function bodyPoint(frame, x, y, z) {
   x -= frame.origin[0]; y -= frame.origin[1]; z -= frame.origin[2];
   const inv = 1 / frame.S;
@@ -98,34 +103,44 @@ function cell(side, x, y) {
  * @param {object} args.frame buildBodyFrame result; positions are in bind space.
  * @param {object} args.params fitted DEFAULT_PARAMS-compatible anatomy.
  * @param {Array<{pos:ArrayLike<number>,index?:ArrayLike<number>,mask?:ArrayLike<number>}>} args.meshes selected skin/fitted torso geometry, after static morphing.
- * @param {number[]} [args.divisions] cells in x/y/depth, default [4,5,3].
+ * @param {number[]} [args.divisions] cells in x/y/depth, default [6,7,3].
  * @returns {{positions:Float64Array,tets:Uint32Array,fixed:Uint8Array,sides:Array,info:object,embed:Function,displacement:Function}}
  */
-export function buildTissueProxy({ frame, params, meshes = [], divisions = [4, 5, 3], shell = 0.06 }) {
+export function buildTissueProxy({ frame, params, meshes = [], region = null, coverage = 1.18, divisions = [6, 7, 3], shell = 0.06 }) {
   if (!(frame?.S > 0) || !Number.isFinite(frame.S)) throw new Error('Tissue proxy requires a finite, positive body scale');
   if (!params?.anchor || !(params.depth > 0)) throw new Error('Tissue proxy requires an anchor and positive depth');
   if (divisions.length !== 3 || divisions.some((n) => !Number.isInteger(n) || n < 1)) throw new Error('Tissue proxy divisions must contain three positive integers');
   const [dx, dy, dz] = divisions, nx = dx + 1, ny = dy + 1, nz = dz + 1;
-  const depth = params.depth, wall = params.anchor.z;
-  const rx = Math.max(0.035, Math.min(params.window?.x ?? 0.32, Math.max(0.035, Math.abs(params.anchor.x) * 0.99)));
-  const ryUp = Math.max(0.04, (params.window?.yUp ?? 0.44) * 0.72);
-  const ryDown = Math.max(0.04, (params.window?.yDown ?? 0.42) * 0.72);
-  const yMin = params.anchor.y - ryDown, yMax = params.anchor.y + ryUp;
-  const maxFront = wall + Math.max(depth * 3, 0.08), minDepth = Math.max(depth * 0.025, 1e-4);
-  const bounds = { x0: -Math.abs(params.anchor.x) - rx, x1: Math.abs(params.anchor.x) + rx, y0: yMin, y1: yMax };
+  const depth = params.depth, span = clamp(coverage, 1, 1.5);
+  const cores = region?.sides ?? [1, -1].map(sign => ({ sign, centerU: Math.abs(params.anchor.x), cy: params.anchor.y,
+    inner: Math.max(0, Math.abs(params.anchor.x) - (params.window?.x ?? 0.32)), outer: Math.abs(params.anchor.x) + (params.window?.x ?? 0.32),
+    top: params.anchor.y + (params.window?.yUp ?? 0.44), bottom: params.anchor.y - (params.window?.yDown ?? 0.42),
+    wall: params.anchor.z, peak: params.anchor.z + depth, method: 'explicit-params' }));
+  const wall = Math.min(...cores.map(s => s.wall));
+  // The extension collar must remain a usable volumetric element, not a
+  // near-zero-thickness sliver that clamps the motion of the entire cage.
+  // It is a numerical attachment collar, not an estimate of tissue volume.
+  const maxFront = Math.max(...cores.map(s => s.peak + depth * 2)), minDepth = Math.max(depth * 0.25, 1e-4);
+  const extent = Math.max(...cores.map(s => s.centerU + (s.outer - s.centerU) * span));
+  const bounds = { x0: -extent, x1: extent, y0: Math.min(...cores.map(s => s.cy + (s.bottom - s.cy) * span)), y1: Math.max(...cores.map(s => s.cy + (s.top - s.cy) * span)) };
   const surface = surfaceData(frame, meshes, bounds, wall, maxFront);
   const nodeCount = nx * ny * nz * 2;
   const positions = new Float64Array(nodeCount * 3), fixed = new Uint8Array(nodeCount), tetList = [], sides = [];
-  const info = { nodeCount, tetCount: dx * dy * dz * 12, sampledColumns: 0, nearestColumns: 0, fallbackColumns: 0, sourceTriangles: surface.triangles.length, sourceVertices: surface.vertices.length, maxNearestGap: 0, shell };
+  const info = { nodeCount, tetCount: dx * dy * dz * 12, sampledColumns: 0, nearestColumns: 0, fallbackColumns: 0, sourceTriangles: surface.triangles.length, sourceVertices: surface.vertices.length, maxNearestGap: 0, shell, coverage: span, region: cores };
   const localTets = [[0, 1, 3, 7], [0, 3, 2, 7], [0, 2, 6, 7], [0, 6, 4, 7], [0, 4, 5, 7], [0, 5, 1, 7]];
-  for (const sign of [1, -1]) {
-    const cx = sign * Math.abs(params.anchor.x);
-    const side = { sign, offset: sides.length * nx * ny * nz, nx, ny, nz, xMin: cx - rx, xMax: cx + rx, yMin, yMax, cx, cy: params.anchor.y, rx, ryUp, ryDown, wall, front: new Float64Array(nx * ny) };
-    const nearestRadius = Math.hypot(2 * rx / dx, (yMax - yMin) / dy) * 0.7;
+  for (const core of cores) {
+    const { sign, centerU, cy, wall } = core, cx = sign * centerU;
+    const rxIn = Math.max(0.035, Math.min(centerU, (centerU - core.inner) * span));
+    const rxOut = Math.max(0.035, (core.outer - centerU) * span);
+    const ryUp = Math.max(0.04, (core.top - cy) * span), ryDown = Math.max(0.04, (cy - core.bottom) * span);
+    const xMin = sign > 0 ? cx - rxIn : cx - rxOut, xMax = sign > 0 ? cx + rxOut : cx + rxIn;
+    const yMin = cy - ryDown, yMax = cy + ryUp;
+    const side = { sign, offset: sides.length * nx * ny * nz, nx, ny, nz, xMin, xMax, yMin, yMax, centerU, cx, cy, rxIn, rxOut, ryUp, ryDown, wall, core, front: new Float64Array(nx * ny) };
+    const nearestRadius = Math.hypot((xMax - xMin) / dx, (yMax - yMin) / dy) * 0.7;
     const id = (x, y, z) => side.offset + (z * ny + y) * nx + x;
     for (let iy = 0; iy < ny; iy++) for (let ix = 0; ix < nx; ix++) {
-      const x = side.xMin + ix / dx * 2 * rx, y = yMin + iy / dy * (yMax - yMin);
-      const r = Math.hypot((x - cx) / rx, (y - side.cy) / (y >= side.cy ? ryUp : ryDown));
+      const x = xMin + ix / dx * (xMax - xMin), y = yMin + iy / dy * (yMax - yMin);
+      const r = radial(side, x, y);
       const fit = frontAt(surface, x, y, wall, maxFront, nearestRadius);
       const h = Number.isFinite(fit.z) ? fit.z - wall : depth * Math.sqrt(Math.max(0, 1 - r * r));
       const front = wall + Math.max(minDepth, h);
@@ -161,13 +176,14 @@ export function buildTissueProxy({ frame, params, meshes = [], divisions = [4, 5
     if (pointsBind.length % 3) throw new Error('Tissue embedding positions must be packed xyz triples');
     const count = pointsBind.length / 3;
     if (masks && masks.length !== count) throw new Error('Tissue embedding mask count must match position count');
-    const indices = new Int32Array(count * 8).fill(-1), weights = new Float64Array(count * 8), mask = new Float64Array(count), gaps = new Float64Array(count).fill(Infinity), active = [];
+    const indices = new Int32Array(count * 8).fill(-1), weights = new Float64Array(count * 8), mask = new Float64Array(count), gaps = new Float64Array(count).fill(Infinity), coreRadii = new Float64Array(count).fill(Infinity), active = [];
     for (let p = 0; p < count; p++) {
       const userMask = masks ? clamp(masks[p], 0, 1) : 1;
       if (!(userMask > 0)) continue;
       const [x, y, z] = bodyPoint(frame, pointsBind[3 * p], pointsBind[3 * p + 1], pointsBind[3 * p + 2]);
       const side = sides[x >= 0 ? 0 : 1];
-      const r = Math.hypot((x - side.cx) / side.rx, (y - side.cy) / (y >= side.cy ? side.ryUp : side.ryDown));
+      const r = radial(side, x, y), wall = side.wall;
+      coreRadii[p] = radial({ ...side, rxIn: side.centerU - side.core.inner, rxOut: side.core.outer - side.centerU, ryUp: side.core.top - side.cy, ryDown: side.cy - side.core.bottom }, x, y);
       if (r >= 1 || z <= wall) continue;
       const c = cell(side, x, y), gap = Math.max(0, z - c.front);
       gaps[p] = gap;
@@ -176,7 +192,9 @@ export function buildTissueProxy({ frame, params, meshes = [], divisions = [4, 5
       // must still be excluded by the caller's material/bone mask.
       const shellWeight = shell > 0 ? 1 - smooth((gap - shell * 0.5) / (shell * 0.5)) : +(gap <= 0);
       const zeta = clamp((z - wall) / (c.front - wall), 0, 1);
-      const w = userMask * (1 - smooth((r - 0.45) / 0.55)) * smooth(zeta / 0.24) * shellWeight;
+      // The cage already has an attached outer collar. Do not attenuate the
+      // entire mound a second time from r=0.45: that leaves only its tip alive.
+      const w = userMask * (1 - smooth((r - 0.82) / 0.18)) * smooth(zeta / 0.08) * shellWeight;
       if (!(w > 0)) continue;
       const gz = zeta * dz, iz = Math.min(Math.floor(gz), dz - 1), q = gz - iz;
       let j = p * 8;
@@ -188,7 +206,7 @@ export function buildTissueProxy({ frame, params, meshes = [], divisions = [4, 5
       mask[p] = w;
       active.push(p);
     }
-    return { indices, weights, mask, gaps, count, active: new Uint32Array(active) };
+    return { indices, weights, mask, gaps, coreRadii, count, active: new Uint32Array(active) };
   }
 
   // livePositions are absolute, normalized body-space cage positions. Output

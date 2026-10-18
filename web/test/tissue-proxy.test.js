@@ -13,13 +13,13 @@ const bind = (points, frame = FRAME) => new Float64Array(points.flatMap((p) => f
 
 function capMeshes(p = params(), frame = FRAME, swell = 1) {
   return [1, -1].map((side) => {
-    const pos = [], index = [], n = 20;
-    const rx = p.anchor.x * 0.99, up = p.window.yUp * 0.72, down = p.window.yDown * 0.72;
+    const pos = [], index = [], n = 24;
+    const inside = p.anchor.x, outside = p.window.x * 1.18, up = p.window.yUp * 1.18, down = p.window.yDown * 1.18;
     for (let y = 0; y <= n; y++) for (let x = 0; x <= n; x++) {
-      const qx = (2 * x / n - 1) * rx, qy = -down + y / n * (up + down);
+      const qx = -inside + x / n * (inside + outside), qy = -down + y / n * (up + down);
       // Smooth, non-flat front with nonzero thickness throughout the grid.
-      const z = p.anchor.z + p.depth * swell * (1 - 0.25 * (qx / rx) ** 2 - 0.2 * (qy / (qy > 0 ? up : down)) ** 2);
-      pos.push(...fromBody(frame, [side * p.anchor.x + qx, p.anchor.y + qy, z].map((v) => v * frame.S)));
+      const z = p.anchor.z + p.depth * swell * (1 - 0.25 * (qx / outside) ** 2 - 0.2 * (qy / (qy > 0 ? up : down)) ** 2);
+      pos.push(...fromBody(frame, [side * (p.anchor.x + qx), p.anchor.y + qy, z].map((v) => v * frame.S)));
     }
     for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
       const a = y * (n + 1) + x;
@@ -49,11 +49,11 @@ function front(proxy, side = 0) {
   return (1 - v) * ((1 - u) * s.front[k] + u * s.front[k + 1]) + v * ((1 - u) * s.front[k + s.nx] + u * s.front[k + s.nx + 1]);
 }
 
-test('fitted cage has 240 nodes, 720 strictly positive tetrahedra, chest and rim attachments', () => {
+test('fitted cage has 448 nodes, 1512 strictly positive tetrahedra, chest and outer collar attachments', () => {
   const proxy = buildTissueProxy({ frame: FRAME, params: params(), meshes: capMeshes() });
-  assert.equal(proxy.positions.length, 240 * 3);
-  assert.equal(proxy.tets.length, 720 * 4);
-  assert.equal(proxy.info.sampledColumns, 60);
+  assert.equal(proxy.positions.length, 448 * 3);
+  assert.equal(proxy.tets.length, 1512 * 4);
+  assert.equal(proxy.info.sampledColumns, 112);
   assert.equal(proxy.info.fallbackColumns, 0);
   assert.equal(proxy.info.nearestColumns, 0);
   assert.ok(volumes(proxy).every((v) => v > 1e-9));
@@ -140,11 +140,23 @@ test('rebuilding from statically swollen surface increases rest volume and fits 
 test('missing or excluded surface gives explicit fallback diagnostics and a valid cap volume', () => {
   const p = params(), meshes = capMeshes(p).map((m) => ({ ...m, mask: new Float32Array(m.pos.length / 3) }));
   const proxy = buildTissueProxy({ frame: FRAME, params: p, meshes });
-  assert.equal(proxy.info.fallbackColumns, 60);
+  assert.equal(proxy.info.fallbackColumns, 112);
   assert.equal(proxy.info.sourceTriangles, 0);
   assert.equal(proxy.info.sourceVertices, 0);
   assert.ok(volumes(proxy).every((v) => v > 0));
   assert.ok(front(proxy) > p.anchor.z + 0.8 * p.depth);
+});
+
+test('outer mound receives broad motion instead of a second tip-only attenuation', () => {
+  const p = params(), proxy = buildTissueProxy({ frame: FRAME, params:p, meshes:capMeshes(p) });
+  const x = p.anchor.x + p.window.x * 0.8;
+  const z = p.anchor.z + p.depth * (1 - 0.25 * ((x - p.anchor.x) / (p.window.x * 1.18)) ** 2);
+  const embedding = proxy.embed(bind([[x,p.anchor.y,z]]));
+  assert.equal(embedding.mask[0],1, 'the anatomical flank is inside the moving region, not the transition collar');
+  const live=proxy.positions.slice();
+  for(let n=0;n<proxy.fixed.length;n++) if(!proxy.fixed[n]) live[n*3+1]+=0.01;
+  const d=proxy.displacement(embedding,live);
+  assert.ok(d[1]>0.0045, `outer mound response ${d[1]}`);
 });
 
 test('invalid scale, cage divisions and mismatched transfer buffers are rejected', () => {

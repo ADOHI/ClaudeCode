@@ -2,6 +2,8 @@
 // Static slider morphs remain baked; this adds a live bind-space deformation.
 import { TissueVolume } from '../core/tissue.js';
 import { buildTissueProxy } from '../core/tissue-proxy.js';
+import { fitTissueRegion } from '../core/tissue-region.js';
+import { detCoefficients, safeTransferScale } from '../core/tissue-transfer.js';
 import { ChestTracker, poseAxes } from '../core/runtime.js';
 import { m4Linear, m3Vec, m3Inverse, m3Transpose, m3Det, normalize } from '../core/vec.js';
 import { selectTriangles, NON_TORSO_MATERIALS } from '../core/morpho.js';
@@ -39,12 +41,23 @@ export class TissueRig {
       sources.push({ pos, index: tris, mask: allowed });
       this.meshes.push({ e, pos, allowed, L, Linv, LT: m3Transpose(L), LinvT: m3Transpose(Linv) });
     }
-    this.proxy = buildTissueProxy({ frame: this.frame, params: rig.params, meshes: sources });
+    // Attachments belong to the authored chest wall. Re-detecting the fold on
+    // each size morph can jump to another garment crease and shrink the cage
+    // when the bust grows. Keep the fitted footprint; fit its live front/depth
+    // to the statically morphed surface below.
+    const restSources = sources.map((s, i) => ({ ...s, pos: this.meshes[i].e.posBind }));
+    const region = fitTissueRegion({ frame: this.frame, params: rig.params, meshes: restSources, wallInset: material.wallInset });
+    this.proxy = buildTissueProxy({ frame: this.frame, params: rig.params, meshes: sources, region, coverage: material.coverage });
     this.solver = new TissueVolume({ positions: this.proxy.positions, tets: this.proxy.tets, fixed: this.proxy.fixed, ...material });
     const f = this.frame, axes = [f.left, f.up, f.forward];
     for (const m of this.meshes) {
       const base = this.proxy.embed(m.pos, m.allowed);
       m.active = base.active;
+      m.coreRadii = base.coreRadii;
+      m.mobility = new Float64Array(base.count);
+      for (const v of base.active) for (let q = v * 8; q < v * 8 + 8; q++) {
+        if (!this.proxy.fixed[base.indices[q]]) m.mobility[v] += base.weights[q] * base.mask[v];
+      }
       const probes = new Float64Array(m.active.length * 7 * 3), masks = new Float64Array(m.active.length * 7);
       for (let j = 0; j < m.active.length; j++) {
         const v = m.active[j];
@@ -69,6 +82,7 @@ export class TissueRig {
     this.trackerStatus = 'reset';
     this.resetCount = 0;
     this.lastReset = null;
+    this.transferCoefficients = new Float64Array(this.meshes.reduce((n,m)=>n+m.active.length,0)*3);
   }
 
   reset(reason = 'manual') {
@@ -85,26 +99,24 @@ export class TissueRig {
     for (const step of tracked.steps ?? []) {
       this.solver.advanceTracked(step, material);
     }
-    if(this.maxMappedDisplacement>1e-12 || this.solver.displacements.some(x=>Math.abs(x)>1e-12)) this.apply(weights);
+    if(this.maxMappedDisplacement>1e-12 || this.solver.displacements.some(x=>Math.abs(x)>1e-12)) this.apply(weights, dt);
     this.ms = performance.now() - start;
   }
 
-  apply(weights) {
+  apply(weights, dt) {
     const f = this.frame, axes = [f.left, f.up, f.forward];
     for (const m of this.meshes) this.proxy.displacement(m.embedding, this.solver.positions, m.displacement);
     // A valid tet cage alone does not certify its masked/shell transfer field.
     // Bound the displayed shared map too, scaling every layer identically.
-    this.transferScale = 1;
-    for (let attempt = 0; attempt < 9; attempt++) {
-      let min = 1;
-      for (const m of this.meshes) for (let j = 0; j < m.active.length; j++) {
-        const D = m.displacement, di = j * 21, F = [1,0,0,0,1,0,0,0,1];
-        for (let c = 0; c < 3; c++) for (let r = 0; r < 3; r++) F[r*3+c] += this.transferScale * (D[di+(1+c*2)*3+r]-D[di+(2+c*2)*3+r])/(2*H);
-        min = Math.min(min, m3Det(F));
-      }
-      if (min >= 0.25) break;
-      this.transferScale *= 0.5;
+    let ci=0;
+    for (const m of this.meshes) for (let j=0;j<m.active.length;j++) {
+      const D=m.displacement, di=j*21, A=new Array(9);
+      for(let c=0;c<3;c++) for(let r=0;r<3;r++) A[r*3+c]=(D[di+(1+c*2)*3+r]-D[di+(2+c*2)*3+r])/(2*H);
+      this.transferCoefficients.set(detCoefficients(A),ci); ci+=3;
     }
+    const target=safeTransferScale(this.transferCoefficients);
+    const recovered=this.transferScale+(target-this.transferScale)*(-Math.expm1(-12*Math.max(0,dt)));
+    this.transferScale=Math.min(target,recovered);
     this.transferMinDet = 1;
     this.maxMappedDisplacement = 0;
     for (const m of this.meshes) {
@@ -145,10 +157,19 @@ export class TissueRig {
   }
 
   report() {
+    const bands = Object.fromEntries(['tip', 'body', 'base', 'collar'].map(k => [k, { vertices:0, mean:0, max:0 }]));
+    for (const m of this.meshes) for (let j = 0; j < m.active.length; j++) {
+      const v = m.active[j], r = m.coreRadii[v], key = r < 0.45 ? 'tip' : r < 0.8 ? 'body' : r <= 1.05 ? 'base' : 'collar';
+      const d = this.transferScale * Math.hypot(...m.displacement.subarray(j * 21, j * 21 + 3));
+      const b = bands[key]; b.vertices++; b.mean += d; b.max = Math.max(b.max, d);
+    }
+    for (const b of Object.values(bands)) if (b.vertices) b.mean /= b.vertices;
     return { ...this.solver.report(), proxy: this.proxy.info, mappedVertices: this.meshes.reduce((n, m) => n + m.active.length, 0), ms: this.ms,
       transferMinDet: this.transferMinDet, transferScale: this.transferScale, maxMappedDisplacement: this.maxMappedDisplacement, normalGuards: this.normalGuards,
-      trackerStatus: this.trackerStatus, resetCount: this.resetCount, lastReset: this.lastReset };
+      trackerStatus: this.trackerStatus, resetCount: this.resetCount, lastReset: this.lastReset, motionBands: bands };
   }
+
+  coverage() { return new Map(this.meshes.map(m => [m.e.mesh, m.mobility])); }
 
   dispose() {
     for (const { e } of this.meshes) {

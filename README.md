@@ -21,6 +21,8 @@ web/
     runtime.js     실제 흉부 움직임 추적, 비교용 모달 동역학, 팔 들기 포즈 보정
     tissue.js      분포 tet XPBD: Green strain, 요소/구역 체적, 관성, 감쇠, 안전 제한
     tissue-proxy.js 정적 체형에 맞춘 체적 격자와 공통 표면 embedding
+    tissue-region.js 실제 밑선·옆면 단면으로 부착 범위와 흉벽 추정
+    tissue-transfer.js 표시 맵의 연속적인 안전 제한
   src/viewer/      three.js 뷰어 (VRM/GLB/FBX 로드, 슬라이더, 히트맵, 검증 HUD)
     morpho.js      형태계측 (상:하 볼륨비, 정점 각도, IMF 높이 등)
     modal.js       정확 이산화 모달 지글
@@ -38,7 +40,8 @@ wip/phase1/        중단된 작업의 부분 코드 (미검증)
 ## 실행
 
 2026-10-18 뷰어 통합: params JSON A/B, 캐릭터 프로필, 형태계측 HUD에 이어
-240노드/720tet의 3D 연조직 경로를 기본으로 연결했습니다. 크기 변경 시 rest 체적과
+448노드/1512tet의 3D 연조직 경로를 기본으로 연결했습니다. 정점만 흔들리지 않도록
+전체 밑면을 추정하고 고정 collar를 바깥에 둡니다. 크기 변경 시 rest 체적과
 질량을 재생성합니다. 사용법·검증·현재 한계는 [docs/VIEWER.md](docs/VIEWER.md),
 이식 수식과 golden 데이터는 [docs/METHOD.md](docs/METHOD.md)를 참고하세요.
 
