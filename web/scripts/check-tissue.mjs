@@ -24,7 +24,9 @@ try {
     let peak = 0, minDet = 1, maxVolumeError = 0, transferMin = 1, maxMs = 0;
     const samples = [];
     for (let i = 0; i < 120; i++) {
-      lab.step(1/60, 1);
+      // Sample every simulated display frame without queueing 120 large
+      // SwiftShader draws. The final state is rendered for the screenshot.
+      lab.step(1/60, 1, false);
       const r = lab.tissueReport();
       peak = Math.max(peak, r.maxMappedDisplacement);
       minDet = Math.min(minDet, r.minDet);

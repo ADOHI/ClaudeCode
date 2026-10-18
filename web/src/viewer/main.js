@@ -722,7 +722,7 @@ window.__bust = {
   weights: () => model?.weights,
   runtime: () => ({ status: model?.dynamicsStatus, targets: model?.rig?.field?.targets, armDeg: model?.poseInfo?.armDeg, bodyBob: model?.motion?.bob }),
   // deterministic stepping for screenshots
-  step: (dt, n = 1) => { for (let i = 0; i < n; i++) frame(dt, i === n - 1); },
+  step: (dt, n = 1, render = true) => { for (let i = 0; i < n; i++) frame(dt, render && i === n - 1); },
   pause: () => renderer.setAnimationLoop(null),
   ready: false,
 };
