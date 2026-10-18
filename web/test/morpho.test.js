@@ -8,6 +8,7 @@ import {
 import { createBustField, DEFAULT_PARAMS, cloneParams } from '../src/core/field.js';
 import { bakeMesh } from '../src/core/bake.js';
 import { synthTorso, midpointSubdivide, SYNTH_FRAME } from '../../tools/morpho/synth-torso.mjs';
+import { bakeBind } from '../../tools/morpho/bindio.mjs';
 
 const measure = (s, extra = {}) => measureBust({ frame: s.frame, meshes: [{ pos: s.pos, index: s.index }], apex: s.apex, ...extra });
 
@@ -242,4 +243,34 @@ test('defaults are serializable data (shared with the Python mirror)', () => {
   const o = JSON.parse(JSON.stringify(MORPHO_DEFAULTS));
   assert.equal(o.axisDepths.length, 17);
   assert.deepEqual(Object.keys(JSON.parse(JSON.stringify(BANDS))), ['natural', 'anime']);
+});
+
+test('bind exports are baked in bind space even when the source mesh has a transform', () => {
+  const params = cloneParams(DEFAULT_PARAMS);
+  const pos = Float32Array.from([0.24, 0.05, 0.4, -0.24, 0.05, 0.4]);
+  const mask = Float32Array.from([1, 0.6]);
+  const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  // Exported positions are already bind-space points. This matrix records
+  // the original mesh transform solely for eventual local-space output.
+  const transform = [0, 2, 0, 0, -3, 0, 0, 0, 0, 0, 0.5, 0, 5, -2, 7, 1];
+  const mesh = { pos, mask, bindMatrix: transform };
+  const { field, deltas } = bakeBind({ frame: SYNTH_FRAME, meshes: [mesh] }, params);
+  const canonical = bakeBind({ frame: SYNTH_FRAME, meshes: [{ ...mesh, bindMatrix: identity }] }, params);
+  for (const name of field.targets) {
+    for (let v = 0; v < pos.length / 3; v++) {
+      const expected = field.delta(name, Array.from(pos.subarray(v * 3, v * 3 + 3)));
+      for (let j = 0; j < 3; j++) assert.ok(Math.abs(deltas[0][name][v * 3 + j] - expected[j] * mask[v]) < 1e-8, `${name} vertex ${v} axis ${j}`);
+    }
+    assert.deepEqual(deltas[0][name], canonical.deltas[0][name]);
+  }
+});
+
+test('flagged side metrics and flagged IMF references are never scored', () => {
+  const r = measure(synthTorso({ h: 0.02, P: 0.01 }));
+  const invalid = r.sides[0];
+  assert.equal(invalid.ok, false);
+  assert.equal(scoreBands(invalid, BANDS.natural).distance, null);
+  const valid = { ok: true, upperPoleFrac: 0.45, tiltDeg: 20, imfY: 0.1 };
+  const score = scoreBands(valid, BANDS.natural, { reference: { ok: false, imfY: 0.12 } });
+  assert.ok(score.missing.includes('imfRise'));
 });

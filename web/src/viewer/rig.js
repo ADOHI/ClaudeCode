@@ -8,13 +8,16 @@ import { autoFitAnchor } from '../core/autofit.js';
 import { fieldCheck, meshCheck, normalCheck } from '../core/validate.js';
 import { m4Point, m4Linear, m3Vec, m3Inverse } from '../core/vec.js';
 import { meshBindData, boneBindPosition } from './model.js';
+import { prepareMorpho, measurePrepared, selectTriangles, SKIN_MATERIALS, NON_TORSO_MATERIALS } from '../core/morpho.js';
+import { materialRule } from './config.js';
 
 export class BustRig {
-  constructor({ root, vrm, meshes, bones }) {
+  constructor({ root, vrm, meshes, bones, profile = null }) {
     this.root = root;
     this.vrm = vrm;
     this.meshes = meshes;
     this.bones = bones;
+    this.profile = profile;
     this.entries = [];
     this.heat = false;
   }
@@ -45,6 +48,19 @@ export class BustRig {
       const d = meshBindData(mesh, this.bones, maskOpts);
       d.mask = d.excluded && d.skinIndex ? computeMask(d.skinIndex, d.skinWeight, d.skinItemSize, d.positions.length / 3, d.excluded) : null;
       const n = d.positions.length / 3;
+      if (this.profile?.materials.length) {
+        const allowed = new Uint8Array(n), excluded = new Uint8Array(n);
+        for (const g of this.materialGroups(mesh)) {
+          const rule = materialRule(this.profile, mesh.name, g.material);
+          for (let i = g.start; i < g.start + g.count; i++) {
+            const v = d.index ? d.index[i] : i;
+            if (rule?.role === 'exclude') excluded[v] = 1;
+            else allowed[v] = 1;
+          }
+        }
+        d.mask ??= new Float32Array(n).fill(1);
+        for (let v = 0; v < n; v++) if (excluded[v] && !allowed[v]) d.mask[v] = 0;
+      }
       d.posBind = new Float32Array(n * 3);
       for (let v = 0; v < n; v++) {
         d.posBind.set(m4Point(d.bindMatrix, [d.positions[v * 3], d.positions[v * 3 + 1], d.positions[v * 3 + 2]]), v * 3);
@@ -81,6 +97,7 @@ export class BustRig {
     }
     this.bakeMs = performance.now() - t0;
     this.touched = touched;
+    this.prepareMetrics();
     if (this.heat) this.setHeatmap(true);
     return { ms: this.bakeMs, touched, meshes: this.baked.length };
   }
@@ -88,11 +105,56 @@ export class BustRig {
   setWeights(weights) {
     for (const e of this.baked) {
       const dict = e.mesh.morphTargetDictionary;
-      for (const [name, w] of Object.entries(weights)) {
+      for (const name of this.field.targets) {
         const i = dict[name];
-        if (i !== undefined) e.mesh.morphTargetInfluences[i] = w;
+        if (i !== undefined) e.mesh.morphTargetInfluences[i] = weights[name] ?? 0;
       }
     }
+  }
+
+  materialGroups(mesh) {
+    const material = mesh.userData.bustOrigMaterial ?? mesh.material;
+    const mats = Array.isArray(material) ? material : [material];
+    const groups = mesh.geometry.groups.length ? mesh.geometry.groups : [{ start: 0, count: mesh.geometry.index?.count ?? mesh.geometry.attributes.position.count, materialIndex: 0 }];
+    return groups.map((g) => ({ start: g.start, count: g.count, material: mats[g.materialIndex ?? 0]?.name ?? '' }));
+  }
+
+  prepareMetrics(selection = this.metricSelection ?? 'outer') {
+    this.metricSelection = selection;
+    const meshes = this.entries.map((e) => {
+      const groups = this.materialGroups(e.mesh);
+      const selected = groups.filter((g) => {
+        const rule = materialRule(this.profile, e.mesh.name, g.material);
+        if (rule) return selection === 'skin' ? rule.role === 'skin' : rule.role !== 'exclude';
+        return selection === 'all' || (selection === 'skin' ? SKIN_MATERIALS.test(g.material) : !NON_TORSO_MATERIALS.test(g.material));
+      });
+      // selectTriangles with an empty group list means all; use an explicit empty index instead.
+      const tris = selected.length ? selectTriangles(e.index, e.positions.length / 3, selected) : new Uint32Array();
+      const L = m4Linear(e.bindMatrix), deltas = {};
+      for (const [name, target] of Object.entries(e.result?.targets ?? {})) {
+        const out = new Float32Array(target.dPos.length);
+        for (let i = 0; i < out.length; i += 3) out.set(m3Vec(L, target.dPos.subarray(i, i + 3)), i);
+        deltas[name] = out;
+      }
+      return { pos: e.posBind, tris, mask: e.mask, deltas };
+    });
+    const f = this.frame;
+    const shoulderY = ['leftUpperArm', 'rightUpperArm'].reduce((sum, k) => {
+      const p = this.bindPos(k);
+      return sum + p.reduce((a, x, i) => a + (x - f.origin[i]) * f.up[i], 0) / (2 * f.S);
+    }, 0);
+    this.morpho = prepareMorpho({ frame: f, meshes, apex: this.field.sides.map((s) => s.apex), shoulderY });
+    this.baseMetrics = measurePrepared(this.morpho);
+    this.metricKey = null;
+  }
+
+  measure(weights = {}) {
+    const key = JSON.stringify(weights);
+    if (this.metricKey !== key) {
+      this.metricResult = measurePrepared(this.morpho, weights);
+      this.metricKey = key;
+    }
+    return this.metricResult;
   }
 
   // Everything a bake-time tool (Python teacher / distiller / Blender port)
@@ -136,11 +198,7 @@ export class BustRig {
           // local -> bind (column-major), to bring deltas back into mesh space
           bindMatrix: e.bindMatrix,
           // index ranges per material (MMD/VRM put body and clothes in one mesh)
-          groups: (e.mesh.geometry.groups ?? []).map((g) => {
-            const mats = Array.isArray(e.mesh.material) ? e.mesh.material : [e.mesh.material];
-            const m = mats[g.materialIndex ?? 0];
-            return { start: g.start, count: g.count, material: m?.name ?? String(g.materialIndex) };
-          }),
+          groups: this.materialGroups(e.mesh),
         };
       }),
     };
@@ -168,9 +226,11 @@ export class BustRig {
     if (main) {
       const t = 'bust_size_up_stylized';
       const r = main.result.targets[t];
-      normals = normalCheck(main.positions, main.index, main.normals, r.dPos, r.dNrm, this.frame.S);
-      normals.mesh = main.mesh.name;
-      normals.target = t;
+      if (r && main.normals) {
+        normals = normalCheck(main.positions, main.index, main.normals, r.dPos, r.dNrm, this.frame.S);
+        normals.mesh = main.mesh.name;
+        normals.target = t;
+      }
     }
     return { field, mesh, normals, ms: performance.now() - t0 };
   }

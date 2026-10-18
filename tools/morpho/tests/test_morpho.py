@@ -60,6 +60,16 @@ def test_band_score():
     assert abs(s1["per"]["tiltDeg"]["d"] - 0.5) < 1e-12 and "imfRise" in s1["missing"]
 
 
+def test_flagged_side_and_reference_are_not_scored():
+    r = measure(synth_torso(h=0.02, P=0.01))
+    invalid = r["sides"][0]
+    assert not invalid["ok"]
+    assert score_bands(invalid, BANDS["natural"])["distance"] is None
+    valid = {"ok": True, "upperPoleFrac": 0.45, "tiltDeg": 20, "imfY": 0.1}
+    result = score_bands(valid, BANDS["natural"], reference={"ok": False, "imfY": 0.12})
+    assert "imfRise" in result["missing"]
+
+
 def test_select_triangles():
     index = np.array([0, 1, 2, 1, 2, 3, 2, 3, 4, 3, 4, 5])
     groups = [

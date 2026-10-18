@@ -4,7 +4,9 @@ import GUI from 'lil-gui';
 import { loadModel, resolveBones, collectMeshes, entriesFromFileList, entriesFromZip } from './model.js';
 import { BustRig } from './rig.js';
 import { DEFAULT_PARAMS, cloneParams, buildBodyFrame } from '../core/field.js';
-import { BustDynamics, DEFAULT_DYNAMICS, DEFAULT_POSE, poseCorrective, combineWeights } from '../core/runtime.js';
+import { BustDynamics, DEFAULT_DYNAMICS, DEFAULT_POSE, poseCorrective, bustWeights, withRuntimeTargets, dynamicEnvelope, runtimeTargets } from '../core/runtime.js';
+import { BANDS, scoreBands } from '../core/morpho.js';
+import { parseParams, applyParams, parseProfile } from './config.js';
 
 const qs = new URLSearchParams(location.search);
 const DEFAULT_MODEL = qs.get('model') ?? `${import.meta.env.BASE_URL}models/Seed-san.vrm`;
@@ -13,11 +15,15 @@ const DEFAULT_MODEL = qs.get('model') ?? `${import.meta.env.BASE_URL}models/Seed
 const state = {
   sliders: { size: 0, style: 0.5, lift: 0, spread: 0 },
   params: cloneParams(DEFAULT_PARAMS),
-  dyn: { ...DEFAULT_DYNAMICS },
+  dyn: { ...DEFAULT_DYNAMICS, mapping: 'dedicated', vskin: { ...DEFAULT_DYNAMICS.vskin } },
   pose: { ...DEFAULT_POSE },
   anim: { play: false, armDown: 65, bob: 0.035, bobHz: 1.8, armCycle: false },
-  view: { heatmap: false, gizmo: false, hud: qs.get('hud') !== '0', autoFit: true },
+  view: { heatmap: false, gizmo: false, hud: qs.get('hud') !== '0', autoFit: true, metrics: true, selection: 'outer' },
+  preset: 'Hand tuned',
+  profile: null,
 };
+const presets = new Map();
+let activeEnvelope;
 
 // ---------------------------------------------------------------- three
 const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
@@ -77,8 +83,13 @@ async function open(source) {
   scene.add(loaded.root);
   loaded.root.updateMatrixWorld(true);
   const bones = resolveBones(loaded.root, loaded.vrm);
+  for (const [key, name] of Object.entries(state.profile?.bones ?? {})) {
+    const bone = loaded.root.getObjectByName(name);
+    if (!bone?.isBone) throw new Error(`Profile bone not found: ${key} = ${name}`);
+    bones[key] = bone;
+  }
   const meshes = collectMeshes(loaded.root);
-  const rig = new BustRig({ ...loaded, meshes, bones });
+  const rig = new BustRig({ ...loaded, meshes, bones, profile: state.profile });
   model = { ...loaded, rig, bones };
   setLighting(loaded.mmd ? 'mmd' : 'default');
   const missing = rig.missingBones();
@@ -99,21 +110,29 @@ async function open(source) {
   model.chestBindInv = new THREE.Matrix4();
   setupPosing();
   rig.prepare(state.params.mask);
-  if (state.view.autoFit) autoFit(false);
+  // Imported fields are already fitted to their source character. Never move
+  // their anchors silently; only the hand-tuned baseline is auto-fitted.
+  if (state.view.autoFit && state.preset === 'Hand tuned' && !state.profile?.region?.anchor) autoFit(false);
+  applyProfileRegion();
+  if (state.preset === 'Hand tuned') presets.set('Hand tuned', cloneParams(state.params));
+  syncPresetOptions();
+  Object.assign(dynamics.o, { restAxes: model.restFrame });
+  dynamics.reset();
   rebake();
   setView('threeQuarter');
   statusEl.textContent = loaded.name;
 }
 
 function autoFit(doBake = true) {
+  if (!model?.rig?.frame) return;
   const fit = model.rig.autoFit(state.params);
   model.fit = fit;
   if (fit) {
-    state.params.anchor = {
+    Object.assign(state.params.anchor, {
       x: +fit.anchor.x.toFixed(3),
       y: +fit.anchor.y.toFixed(3),
       z: +fit.anchor.z.toFixed(3),
-    };
+    });
     gui.controllersRecursive().forEach((c) => c.updateDisplay());
   }
   if (doBake) rebake();
@@ -121,10 +140,88 @@ function autoFit(doBake = true) {
 
 function rebake() {
   if (!model?.rig?.frame) return;
-  const r = model.rig.bake(state.params);
+  updateDynamics();
+  dynamics.reset();
+  activeEnvelope = dynamicEnvelope(state.params, runtimeTargets(state.params));
+  // Extra dynamic shapes must exist before their signed weights are driven.
+  const r = model.rig.bake(withRuntimeTargets(state.params));
+  if (model.rig.metricSelection !== state.view.selection) model.rig.prepareMetrics(state.view.selection);
   report = { bake: r, validation: null };
   buildGizmo();
   renderHud();
+}
+
+function updateDynamics() {
+  Object.assign(dynamics.o, state.dyn, { params: state.params, restAxes: model?.restFrame ?? null });
+}
+
+function applyProfileRegion() {
+  const region = state.profile?.region;
+  if (!region) return;
+  applyParams(state.params, { ...state.params, ...region, anchor: { ...state.params.anchor, ...region.anchor }, window: { ...state.params.window, ...region.window } });
+}
+
+function syncPresetOptions() {
+  activePreset = state.preset;
+  presetController.options([...presets.keys()]);
+  gui.controllersRecursive().forEach((c) => c.updateDisplay());
+}
+
+function selectPreset(name) {
+  if (!presets.has(name)) throw new Error(`Unknown params preset: ${name}`);
+  // Keep manual edits when switching back to this slot.
+  presets.set(state.preset, cloneParams(state.params));
+  applyParams(state.params, presets.get(name));
+  state.preset = name;
+  if (model?.rig?.frame) model.rig.prepare(state.params.mask);
+  rebake();
+  syncPresetOptions();
+}
+
+function importParams(input, name = 'Imported params') {
+  const params = parseParams(input);
+  // Replace an existing imported slot without overwriting it with the old UI state.
+  presets.set(state.preset, cloneParams(state.params));
+  presets.set(name, params);
+  applyParams(state.params, params);
+  state.preset = name;
+  if (model?.rig?.frame) model.rig.prepare(state.params.mask);
+  rebake();
+  syncPresetOptions();
+  return params;
+}
+
+async function importProfile(input) {
+  const profile = parseProfile(input);
+  // Resolve all overrides before mutating the active rig.
+  const overrides = Object.fromEntries(Object.entries(profile.bones).map(([key, name]) => {
+    const bone = model?.root.getObjectByName(name);
+    if (model && !bone?.isBone) throw new Error(`Profile bone not found: ${key} = ${name}`);
+    return [key, bone];
+  }));
+  state.profile = profile;
+  applyProfileRegion();
+  if (model) {
+    // Restore the authored pose before recording new rest axes/bone rotations.
+    if (model.rest) {
+      model.pose.mover.position.copy(model.rest.moverPos);
+      model.pose.lua.quaternion.copy(model.rest.lua);
+      model.pose.rua.quaternion.copy(model.rest.rua);
+      model.vrm?.update(0);
+      model.root.updateMatrixWorld(true);
+    }
+    model.bones = { ...resolveBones(model.root, model.vrm), ...overrides };
+    model.rig.bones = model.bones;
+    model.rig.profile = profile;
+    const missing = model.rig.missingBones();
+    if (missing.length) throw new Error(`Profile missing bones: ${missing.join(', ')}`);
+    model.restFrame = buildBodyFrame(Object.fromEntries(['hips', 'chest', 'neck', 'leftUpperArm', 'rightUpperArm'].map((k) => [k, worldPos(model.bones[k])])));
+    setupPosing();
+    model.rig.prepare(state.params.mask);
+    rebake();
+  }
+  gui.controllersRecursive().forEach((c) => c.updateDisplay());
+  return profile;
 }
 
 function runValidation() {
@@ -137,7 +234,13 @@ function runValidation() {
 // ---------------------------------------------------------------- posing
 function setupPosing() {
   const { vrm, bones } = model;
-  const node = (k) => (vrm ? vrm.humanoid.getNormalizedBoneNode(k) : bones[k]);
+  const node = (k) => {
+    if (!vrm) return bones[k];
+    // VRM.update copies normalized human bones to their raw counterparts.
+    // A profile naming that same raw bone must still drive its normalized node.
+    if (!state.profile?.bones[k] || vrm.humanoid.getRawBoneNode(k) === bones[k]) return vrm.humanoid.getNormalizedBoneNode(k) ?? bones[k];
+    return bones[k];
+  };
   // Body bob moves the lowest common ancestor of hips and chest: for MMD
   // rigs 下半身 (hips) is a sibling of 上半身, so moving it alone would tear
   // the body apart.
@@ -160,6 +263,7 @@ function setupPosing() {
     return THREE.MathUtils.radToDeg(Math.acos(THREE.MathUtils.clamp(-d.dot(new THREE.Vector3(...f.up)), -1, 1)));
   };
   model.rest = {
+    chestWorld: bones.chest.getWorldQuaternion(new THREE.Quaternion()),
     moverPos: model.pose.mover.position.clone(),
     lua: model.pose.lua.quaternion.clone(),
     rua: model.pose.rua.quaternion.clone(),
@@ -285,6 +389,7 @@ function setView(name) {
 
 // ---------------------------------------------------------------- HUD
 const fmt = (x, d = 3) => (x === undefined || x === null || Number.isNaN(x) ? '-' : Number(x).toFixed(d));
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 function renderHud() {
   hud.classList.toggle('hidden', !state.view.hud);
   if (!state.view.hud) return;
@@ -293,10 +398,11 @@ function renderHud() {
     hud.textContent = 'loading…';
     return;
   }
-  L.push(`<b>${model.name}</b>`);
+  L.push(`<b>${esc(model.name)}</b>`);
+  L.push(`params: ${esc(state.preset)}${state.profile ? ` | profile: ${esc(state.profile.name)}` : ''}`);
   const b = model.bones;
-  L.push(`bones: ${Object.entries(b).map(([k, v]) => `${k}=${v ? v.name : '<span class=bad>?</span>'}`).join(', ')}`);
-  if (report?.error) L.push(`<span class=bad>${report.error}</span>`);
+  L.push(`bones: ${Object.entries(b).map(([k, v]) => `${k}=${v ? esc(v.name) : '<span class=bad>?</span>'}`).join(', ')}`);
+  if (report?.error) L.push(`<span class=bad>${esc(report.error)}</span>`);
   if (report?.bake) {
     const r = report.bake;
     L.push(`bake: ${fmt(r.ms, 0)} ms, ${r.touched} verts on ${r.meshes} meshes, S=${fmt(model.rig.frame.S)}`);
@@ -304,8 +410,17 @@ function renderHud() {
     L.push(fit
       ? `auto-fit: anchor ${fmt(fit.anchor.x)}, ${fmt(fit.anchor.y)}, ${fmt(fit.anchor.z)}  prominence ${fmt(fit.prominence)}${fit.usedPrior ? ' <span class=warn>(flat chest → anatomical prior)</span>' : ''}`
       : '<span class=warn>auto-fit failed, using manual anchor</span>');
-    const per = model.rig.baked.map((e) => `${e.mesh.name || '(mesh)'}:${e.result.touched}`);
+    const per = model.rig.baked.map((e) => `${esc(e.mesh.name || '(mesh)')}:${e.result.touched}`);
     L.push(`  ${per.join('  ')}`);
+  }
+  if (state.view.metrics && model.rig.morpho) {
+    const metrics = model.rig.measure(model.weights);
+    const m = metrics.mean;
+    L.push(`<b>morphometrics</b> (${state.view.selection}, bind shape)`);
+    L.push(`upper/lower ${fmt(m.upperPoleFrac == null ? null : m.upperPoleFrac * 100, 1)} / ${fmt(m.upperPoleFrac == null ? null : (1 - m.upperPoleFrac) * 100, 1)}% | apex ${fmt(m.tiltDeg, 1)}°`);
+    L.push(`projection/base ${fmt(m.projectionRatio)} | IMF ${fmt(m.imfY)} S | upper ${esc(m.upperShape ?? '-')}`);
+    L.push(`natural distance ${fmt(scoreBands(m, BANDS.natural, { reference: model.rig.baseMetrics.mean }).distance, 2)} | anime hypothesis ${fmt(scoreBands(m, BANDS.anime, { reference: model.rig.baseMetrics.mean }).distance, 2)}`);
+    if (!metrics.ok || m.flags.length) L.push(`<span class=warn>measurement: ${esc(m.flags.join(', ') || 'insufficient surface')}</span>`);
   }
   const v = report?.validation;
   if (v) {
@@ -327,7 +442,7 @@ function renderHud() {
   }
   if (model.weights) {
     L.push('<b>weights</b>');
-    L.push(Object.entries(model.weights).filter(([, w]) => w > 0.001).map(([k, w]) => `${k}=${fmt(w, 2)}`).join('  ') || '(all 0)');
+    L.push(Object.entries(model.weights).filter(([, w]) => Math.abs(w) > 0.001).map(([k, w]) => `${esc(k)}=${fmt(w, 2)}`).join('  ') || '(all 0)');
   }
   if (model.poseInfo?.armDeg !== undefined) L.push(`arm elevation ${fmt(model.poseInfo.armDeg, 0)}°`);
   hud.innerHTML = L.join('\n');
@@ -335,6 +450,17 @@ function renderHud() {
 
 // ---------------------------------------------------------------- GUI
 const gui = new GUI({ title: 'Bust Morph Lab' });
+presets.set('Hand tuned', cloneParams(state.params));
+const fP = gui.addFolder('Params / character');
+const presetController = fP.add(state, 'preset', [...presets.keys()]).name('params preset').onChange((name) => {
+  // lil-gui writes state.preset first; restore the actual previous slot.
+  state.preset = activePreset;
+  selectPreset(name);
+  activePreset = name;
+});
+let activePreset = state.preset;
+fP.add({ loadParams: () => paramsInput.click() }, 'loadParams').name('load params JSON…');
+fP.add({ loadProfile: () => profileInput.click() }, 'loadProfile').name('load character profile…');
 const fS = gui.addFolder('Sliders (blend shapes)');
 fS.add(state.sliders, 'size', -1, 1, 0.01).name('size −/+');
 fS.add(state.sliders, 'style', 0, 1, 0.01).name('style natural→stylized');
@@ -347,10 +473,11 @@ fA.add(state.anim, 'armDown', -80, 85, 1).name('arm down (deg)');
 fA.add(state.anim, 'armCycle').name('arm raise cycle');
 fA.add(state.anim, 'bob', 0, 0.1, 0.001).name('body bob (S)');
 fA.add(state.anim, 'bobHz', 0.5, 4, 0.1);
-fA.add(state.dyn, 'enabled').name('jiggle (bone-free)').onChange(() => Object.assign(dynamics.o, state.dyn));
-for (const [k, lo, hi] of [['frequency', 0.5, 6], ['damping', 0.02, 1], ['gain', 0, 3], ['squashStretch', 0, 1.5]]) {
-  fA.add(state.dyn, k, lo, hi, 0.01).onChange(() => Object.assign(dynamics.o, state.dyn));
+fA.add(state.dyn, 'enabled').name('jiggle (bone-free)').onChange(updateDynamics);
+for (const [k, lo, hi] of [['frequency', 0.5, 6], ['damping', 0.02, 1], ['gain', 0, 3]]) {
+  fA.add(state.dyn, k, lo, hi, 0.01).onChange(updateDynamics);
 }
+fA.add(state.dyn.vskin, 'enabled').name('velocity shapes');
 fA.add(state.pose, 'enabled').name('pose corrective');
 fA.add(state.pose, 'lift', 0, 1, 0.01).name('arm-raise lift');
 
@@ -361,10 +488,10 @@ fR.add(state.params.anchor, 'y', -0.5, 0.5, 0.005).name('anchor y').onFinishChan
 fR.add(state.params.anchor, 'z', -0.3, 0.6, 0.005).name('anchor z (base)').onFinishChange(rebake);
 fR.add(state.params, 'depth', 0.05, 0.4, 0.005).onFinishChange(rebake);
 for (const k of ['x', 'yUp', 'yDown', 'zFront', 'zBack', 'hardness', 'hardnessZ']) {
-  fR.add(state.params.window, k, 0, k.startsWith('hard') ? 0.95 : 1.5, 0.005).name(`window ${k}`).onFinishChange(rebake);
+  fR.add(state.params.window, k, k.startsWith('hard') ? 0 : 0.005, k.startsWith('hard') ? 0.95 : 1.5, 0.005).name(`window ${k}`).onFinishChange(rebake);
 }
-fR.add(state.params.mask, 'excludeArms').onChange(() => { model.rig.prepare(state.params.mask); rebake(); });
-fR.add(state.params.mask, 'excludeHead').onChange(() => { model.rig.prepare(state.params.mask); rebake(); });
+fR.add(state.params.mask, 'excludeArms').onChange(() => { model?.rig.prepare(state.params.mask); rebake(); });
+fR.add(state.params.mask, 'excludeHead').onChange(() => { model?.rig.prepare(state.params.mask); rebake(); });
 fR.add({ autoFit: () => autoFit(true) }, 'autoFit').name('auto-fit anchors');
 fR.close();
 
@@ -372,6 +499,8 @@ const fV = gui.addFolder('View / tools');
 fV.add(state.view, 'heatmap').onChange((on) => model?.rig.setHeatmap(on));
 fV.add(state.view, 'gizmo').onChange((on) => (gizmo.visible = on));
 fV.add(state.view, 'hud').onChange(renderHud);
+fV.add(state.view, 'metrics').name('morphometrics HUD');
+fV.add(state.view, 'selection', ['outer', 'skin', 'all']).name('measure surface').onChange((s) => { if (model?.rig?.field) model.rig.prepareMetrics(s); renderHud(); });
 const views = { front: () => setView('front'), side: () => setView('side'), threeQuarter: () => setView('threeQuarter'), closeFront: () => setView('closeFront') };
 for (const k of Object.keys(views)) fV.add(views, k);
 fV.add({ validate: runValidation }, 'validate').name('run validation');
@@ -383,7 +512,7 @@ function exportParams() {
   const data = {
     format: 'bust-morph-params/1',
     note: 'Lengths in S = distance between upper-arm joints. Body frame: right-handed, forward = cross(left, up).',
-    bones: Object.fromEntries(Object.entries(model.bones).map(([k, v]) => [k, v?.name ?? null])),
+    bones: Object.fromEntries(Object.entries(model?.bones ?? {}).map(([k, v]) => [k, v?.name ?? null])),
     params: state.params,
     sliders: state.sliders,
     dynamics: state.dyn,
@@ -393,10 +522,23 @@ function exportParams() {
   a.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
   a.download = 'bust-morph-params.json';
   a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 0);
 }
 
 // ---------------------------------------------------------------- files
 const fileInput = Object.assign(document.createElement('input'), { type: 'file', multiple: true, accept: '.vrm,.glb,.gltf,.fbx,.pmx,.pmd,.zip' });
+const paramsInput = Object.assign(document.createElement('input'), { type: 'file', accept: '.json' });
+paramsInput.onchange = async () => {
+  const f = paramsInput.files[0];
+  if (f) { try { importParams(await f.text(), f.name); activePreset = state.preset; } catch (e) { fail(e); } }
+  paramsInput.value = '';
+};
+const profileInput = Object.assign(document.createElement('input'), { type: 'file', accept: '.json' });
+profileInput.onchange = async () => {
+  const f = profileInput.files[0];
+  if (f) { try { await importProfile(await f.text()); } catch (e) { fail(e); } }
+  profileInput.value = '';
+};
 fileInput.onchange = () => openFiles(fileInput.files).catch(fail);
 const dirInput = Object.assign(document.createElement('input'), { type: 'file', webkitdirectory: true });
 dirInput.onchange = () => openFiles(dirInput.files).catch(fail);
@@ -435,6 +577,12 @@ function walkEntry(entry, prefix, out) {
 async function openFiles(fileList) {
   const files = [...fileList];
   if (!files.length) return;
+  if (files.length === 1 && /\.json$/i.test(files[0].name)) {
+    const data = JSON.parse(await files[0].text());
+    if (data.format === 'bust-character-profile/1') return importProfile(data);
+    importParams(data, files[0].name); activePreset = state.preset;
+    return;
+  }
   const zip = files.find((f) => /\.zip$/i.test(f.name));
   if (zip) return openEntries(entriesFromZip(await zip.arrayBuffer(), qs.get('zipEncoding') ?? 'shift_jis'), zip.name);
   if (files.length > 1 || files.some((f) => /\.(pmx|pmd)$/i.test(f.name))) return openEntries(entriesFromFileList(files), files[0].name);
@@ -463,13 +611,17 @@ function frame(dt) {
     model.vrm?.update(dt);
     model.root.updateMatrixWorld(true);
     const f = model.restFrame;
-    const dyn = dynamics.update(dt, worldPos(model.bones.chest), f.up, f.S);
+    const chestRotation = model.bones.chest.getWorldQuaternion(new THREE.Quaternion()).multiply(model.rest.chestWorld.clone().invert());
+    const rotated = (a) => new THREE.Vector3(...a).applyQuaternion(chestRotation).toArray();
+    const chestPose = { pos: worldPos(model.bones.chest), left: rotated(f.left), up: rotated(f.up), forward: rotated(f.forward), S: f.S };
+    const dyn = dynamics.update(dt, chestPose);
     const b = model.bones;
     const pc = b.leftLowerArm && b.rightLowerArm
-      ? poseCorrective(worldPos(b.leftUpperArm), worldPos(b.leftLowerArm), worldPos(b.rightUpperArm), worldPos(b.rightLowerArm), f.up, state.pose)
+      ? poseCorrective(worldPos(b.leftUpperArm), worldPos(b.leftLowerArm), worldPos(b.rightUpperArm), worldPos(b.rightLowerArm), chestPose.up, state.pose)
       : { lift: 0, spread: 0 };
     model.poseInfo = pc;
-    model.weights = combineWeights(state.sliders, dyn, pc);
+    model.weights = bustWeights({ sliders: state.sliders, extras: [dyn, pc], envelope: activeEnvelope });
+    model.dynamicsStatus = dyn.status;
     model.rig.setWeights(model.weights);
     // gizmo follows the chest
     gizmo.matrix.copy(model.bones.chest.matrixWorld).multiply(model.chestBindInv);
@@ -482,7 +634,7 @@ function frame(dt) {
     renderHud();
   }
 }
-renderer.setAnimationLoop(() => frame(Math.min(clock.getDelta(), 0.05)));
+renderer.setAnimationLoop(() => frame(clock.getDelta()));
 
 // ---------------------------------------------------------------- test hook
 window.__bust = {
@@ -490,8 +642,12 @@ window.__bust = {
   open: (url) => open(url),
   setSliders: (s) => Object.assign(state.sliders, s),
   setParams: (fn) => { fn(state.params); rebake(); },
+  importParams: (p, name) => { const result = importParams(p, name); activePreset = state.preset; return result; },
+  selectPreset: (name) => { selectPreset(name); activePreset = state.preset; },
+  importProfile,
+  presets: () => [...presets.keys()],
   setAnim: (a) => Object.assign(state.anim, a),
-  setDyn: (d) => { Object.assign(state.dyn, d); Object.assign(dynamics.o, state.dyn); dynamics.reset(); },
+  setDyn: (d) => { Object.assign(state.dyn, d); updateDynamics(); dynamics.reset(); },
   setView,
   setHeatmap: (on) => { state.view.heatmap = on; model?.rig.setHeatmap(on); },
   setGizmo: (on) => { state.view.gizmo = on; gizmo.visible = on; },
@@ -499,6 +655,9 @@ window.__bust = {
   validate: () => runValidation(),
   exportBind: () => model?.rig?.exportBind(),
   report: () => report,
+  metrics: () => model?.rig?.morpho ? model.rig.measure(model.weights) : null,
+  weights: () => model?.weights,
+  runtime: () => ({ status: model?.dynamicsStatus, targets: model?.rig?.field?.targets, armDeg: model?.poseInfo?.armDeg }),
   // deterministic stepping for screenshots
   step: (dt, n = 1) => { for (let i = 0; i < n; i++) frame(dt); },
   pause: () => renderer.setAnimationLoop(null),

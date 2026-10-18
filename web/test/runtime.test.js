@@ -13,7 +13,7 @@ import {
 import { SQUASH_BASIS, stretchTensor, vskinWeights, vskinTargets, vskinShapes } from '../src/core/vskin.js';
 import {
   BustDynamics, ChestTracker, poseAxes, relativeRotation, rotateVec, combineWeights, bustWeights,
-  runtimeTargets, withRuntimeTargets, weightSetCheck, dynamicExtremes, sampleMaxDynamics, DYNAMIC_BUDGET,
+  runtimeTargets, withRuntimeTargets, weightSetCheck, dynamicExtremes, sampleMaxDynamics, DYNAMIC_BUDGET, dynamicEnvelope,
 } from '../src/core/runtime.js';
 
 const FRAME = buildBodyFrame({
@@ -486,6 +486,40 @@ test('dedicated mapping only drives targets that runtimeTargets bakes', () => {
   const p = withRuntimeTargets();
   assert.equal(Object.keys(p.targets).length, 7 + 6 + 11);
   assert.equal(Object.keys(DEFAULT_PARAMS.targets).length, 7); // not mutated
+});
+
+test('disabling and re-enabling dynamics starts from the new pose without a false kick', () => {
+  const d = new BustDynamics({ mapping: 'dedicated', gravityGain: 0 });
+  const pose = (x) => ({ pos: [x, 1, 0], up: [0, 1, 0], forward: [0, 0, 1], S });
+  for (let i = 0; i < 5; i++) d.update(1 / 60, pose(0));
+  d.o.enabled = false;
+  assert.equal(d.update(1 / 60, pose(0.1 * S)).status, 'disabled');
+  d.o.enabled = true;
+  const resumed = d.update(1 / 60, pose(0.2 * S));
+  assert.equal(resumed.status, 'init');
+  for (let i = 0; i < 10; i++) d.update(1 / 60, pose(0.2 * S));
+  for (const q of Object.values(d.out.modes)) assert.ok(Math.abs(q) < 1e-12);
+});
+
+test('a zero dynamic amplitude limit produces finite zero weights at rest and in motion', () => {
+  const d = new BustDynamics({ mapping: 'dedicated', limit: 0 });
+  for (let i = 0; i <= 45; i++) {
+    const out = d.update(i ? 1 / 60 : 0, chestAt(i / 60));
+    for (const w of Object.values(out.shapes)) assert.ok(Number.isFinite(w) && w === 0);
+  }
+});
+
+test('dynamic envelope uses the same smooth baseline kernel as the baked field', () => {
+  const p = withRuntimeTargets();
+  p.kernel = 'smooth';
+  const frame = { origin: [0, 0, 0], left: [1, 0, 0], up: [0, 1, 0], forward: [0, 0, 1], S: 1 };
+  const field = createBustField(frame, p);
+  const envelope = dynamicEnvelope(p);
+  const apex = field.sides[0].apex;
+  for (const name of field.targets) {
+    const expected = field.delta(name, apex);
+    for (let i = 0; i < 3; i++) assert.ok(Math.abs(envelope.disp[name].L[i] - expected[i]) < 1e-12, `${name} axis ${i}`);
+  }
 });
 
 // ------------------------------------------------------------ injectivity

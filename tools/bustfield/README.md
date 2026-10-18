@@ -33,6 +33,16 @@ $PY -m bustfield.profile_fit --bind ... --params out.params.json --target bust_s
 $PY -m bustfield.schema out.params.json
 ```
 
+Both distillation and profile-fit CLIs return exit code 1 when the emitted
+parameters fail the determinant gate on any checked grid, including the finer
+repair grid. They still write the parameters and report for diagnosis; a partial
+fit can fail because of untouched targets. Check `gate.passed` before accepting
+an output for use. Runtime `linear` brushes (row-major dimensionless `A`,
+optional radius) and per-op `parity: -1` are supported by the Python field and
+the parameter schema, matching JS. Static slider validation leaves custom
+runtime-only targets at zero, as JS does; it does not certify their driven
+amplitudes.
+
 ## Method notes
 
 - **Linearity.** Window, midline share and lateral lock are applied after the brush sum, so

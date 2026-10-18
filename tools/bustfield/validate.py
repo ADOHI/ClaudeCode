@@ -53,7 +53,7 @@ def combo_dets(Js, targets, combos):
         wt = slider_to_weights(**c)
         F = np.broadcast_to(np.eye(3), (N, 3, 3)).copy()
         for t in targets:
-            a = wt[t]
+            a = wt.get(t, 0)
             if a:
                 F += a * Js[t]
         out[ci] = m3det(F)

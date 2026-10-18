@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Bust field parameters",
-  "description": "Parameters of the bind-space bust deformation field (web/src/core/field.js DEFAULT_PARAMS; Python port tools/bustfield/field.py). All lengths are in S units (S = distance between the two upper-arm joints in bind space). Body frame: x = left (away from the midline on the left side), y = up, z = forward. Brush ops are in the side frame relative to the apex: x = outward (away from the midline, mirrored per side), y = up, z = forward. Each op of a target is applied to both sides (mirror symmetry by construction). Keys starting with '$' or '_' are reserved for metadata and ignored by the field.",
+  "description": "Parameters of the bind-space bust deformation field (web/src/core/field.js DEFAULT_PARAMS; Python port tools/bustfield/field.py). All lengths are in S units (S = distance between the two upper-arm joints in bind space). Body frame: x = left (away from the midline on the left side), y = up, z = forward. Brush ops are in the side frame relative to the apex: x = outward (away from the midline, mirrored per side), y = up, z = forward. Each op is applied to both sides; parity -1 negates it on the right side for antisymmetric runtime motion. Keys starting with '$' or '_' are reserved for metadata and ignored by the field.",
   "type": "object",
   "required": ["anchor", "depth", "window", "targets"],
   "properties": {
@@ -90,8 +90,14 @@
       "maximum": 0.5,
       "default": 0.45
     },
+    "parity": {
+      "description": "1 = mirrored motion, -1 = negate the brush on the right side (antisymmetric side-frame motion).",
+      "type": "number",
+      "enum": [-1, 1],
+      "default": 1
+    },
     "op": {
-      "oneOf": [{ "$ref": "#/$defs/grab" }, { "$ref": "#/$defs/scale" }]
+      "oneOf": [{ "$ref": "#/$defs/grab" }, { "$ref": "#/$defs/scale" }, { "$ref": "#/$defs/linear" }]
     },
     "grab": {
       "description": "Grab brush: displacement `d` exactly at the centre `at`, decaying with radius `radius` (regularization eps).",
@@ -102,7 +108,8 @@
         "at": { "$ref": "#/$defs/vec3" },
         "d": { "$ref": "#/$defs/vec3" },
         "radius": { "type": "number", "exclusiveMinimum": 0 },
-        "nu": { "$ref": "#/$defs/nu" }
+        "nu": { "$ref": "#/$defs/nu" },
+        "parity": { "$ref": "#/$defs/parity" }
       },
       "additionalProperties": false
     },
@@ -115,7 +122,26 @@
         "at": { "$ref": "#/$defs/vec3" },
         "k": { "type": "number", "default": 0 },
         "radius": { "type": "number", "exclusiveMinimum": 0 },
-        "nu": { "$ref": "#/$defs/nu" }
+        "nu": { "$ref": "#/$defs/nu" },
+        "parity": { "$ref": "#/$defs/parity" }
+      },
+      "additionalProperties": false
+    },
+    "linear": {
+      "description": "Dimensionless row-major 3x3 linear brush u = A r. Optional positive radius localizes it with a C2 bump; omitted or zero radius uses only the shared field window.",
+      "type": "object",
+      "required": ["type", "at", "A"],
+      "properties": {
+        "type": { "const": "linear" },
+        "at": { "$ref": "#/$defs/vec3" },
+        "A": {
+          "type": "array",
+          "items": { "type": "number" },
+          "minItems": 9,
+          "maxItems": 9
+        },
+        "radius": { "type": "number", "minimum": 0 },
+        "parity": { "$ref": "#/$defs/parity" }
       },
       "additionalProperties": false
     }

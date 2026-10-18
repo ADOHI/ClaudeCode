@@ -17,7 +17,7 @@ from bustfield import distill as D
 from bustfield.field import DEFAULT_PARAMS, TARGETS, BustField, clone_params
 from bustfield.jsbridge import compare_with_js
 from bustfield.schema import validate
-from bustfield.solve import solve_qp
+from bustfield.solve import det_rows, solve_qp
 
 
 def test_solve_qp_active_and_inactive():
@@ -29,6 +29,29 @@ def test_solve_qp_active_and_inactive():
     # two constraints, one redundant
     x, _ = solve_qp(H, np.zeros(2), np.array([[1.0, 0.0], [2.0, 0.0]]), np.array([1.0, 1.0]))
     assert np.allclose(x, [1, 0], atol=1e-8)
+
+
+def test_gate_rows_ignore_custom_targets_without_slider_weights():
+    # The viewer may include runtime-only linear targets in the base params.
+    # Static slider corners leave these at zero, as JS fieldCheck does.
+    J = {'bust_lift_up': np.array([np.eye(3) * 0.1]), 'runtime_squash': np.array([np.eye(3) * -10])}
+    rows, det = det_rows(J, np.ones((1, 9, 1)), list(J), ['bust_lift_up'], [{'lift': 1}], [(0, 0)])
+    assert np.allclose(det, [1.1 ** 3])
+    assert np.allclose(rows, [[3 * 1.1 ** 2]])
+
+
+def test_finer_grid_failure_cannot_report_a_passing_distillation(frame, monkeypatch):
+    params = clone_params(DEFAULT_PARAMS)
+    params['targets'] = {t: [] for t in TARGETS}
+    target = 'bust_lift_up'
+    samples = D.Samples([[0.24, 0.05, 0.4]], {target: [[0, 0, 0]]}, [1], [0])
+    dic = D.Dictionary([{'type': 'grab', 'at': [0, 0, -0.08], 'radius': 0.2}])
+    monkeypatch.setattr(D, 'gate_check', lambda *a, **kw: (0.1, {
+        2: {'minDet': 0.5}, 3: {'minDet': 0.1},
+    }))
+    result = D.fit_targets(frame, params, samples, [target], dic, gate_res=(2,), repair_res=(2, 3))
+    assert result.gate['minDet'] > 0.2
+    assert not result.gate['passed'] and result.gate['minDet_all_res'] == 0.1
 
 
 @pytest.fixture(scope="module")

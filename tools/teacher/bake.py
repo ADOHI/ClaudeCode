@@ -198,7 +198,9 @@ def main(argv=None):
     bind = BindExport.load(a.bind)
     stats = bake(bind, cfg, a.out, targets=a.targets.split(',') if a.targets else None, with_modes=not a.no_modes)
     bad = [n for n, c in stats['cases'].items() if c['tets_det_le_0'] or not c['converged']]
-    return 1 if bad else 0
+    inverse_failed = not stats['inverse']['converged']
+    unstable_modes = not stats.get('modes', {}).get('stable', True)
+    return 1 if bad or inverse_failed or unstable_modes else 0
 
 
 if __name__ == '__main__':

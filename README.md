@@ -34,6 +34,10 @@ wip/phase1/        중단된 작업의 부분 코드 (미검증)
 
 ## 실행
 
+2026-10-18 뷰어 통합: params JSON A/B 불러오기, 캐릭터 프로필, 형태계측 HUD와 전용
+지글 셰이프를 연결했습니다. 사용법·검증·현재 한계는 [docs/VIEWER.md](docs/VIEWER.md),
+이식 수식과 golden 데이터는 [docs/METHOD.md](docs/METHOD.md)를 참고하세요.
+
 ```bash
 cd web
 npm install

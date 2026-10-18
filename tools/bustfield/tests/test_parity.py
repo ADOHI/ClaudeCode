@@ -34,6 +34,14 @@ def _variant(name):
         p["midline"] = 0.2
         p["midlineLock"] = 0.3
         p["anchor"] = {"x": 0.2, "y": -0.1, "z": 0.1}
+    elif name == "runtime":
+        # Runtime params add affine brushes and antisymmetric pseudo-modes.
+        p["targets"]["bust_linear"] = [
+            {"type": "linear", "at": [0.02, -0.01, -0.05], "A": [0.1, 0.03, 0, -0.04, -0.1, 0.02, 0.01, 0, 0.03]},
+            {"type": "linear", "at": [0, 0.03, -0.02], "A": [0, 0.01, 0, 0, 0, 0.02, 0, -0.01, 0], "radius": 0.25, "parity": -1},
+        ]
+        p["targets"]["bust_lift_up"][0]["parity"] = -1
+        p["targets"]["bust_size_up_natural"][0]["parity"] = -1
     return p
 
 
@@ -65,7 +73,7 @@ def test_slider_to_weights_parity():
         assert slider_to_weights(**s) == w
 
 
-@pytest.mark.parametrize("variant", ["default", "smooth", "random", "random-smooth", "edges", "wide-lock"])
+@pytest.mark.parametrize("variant", ["default", "smooth", "random", "random-smooth", "edges", "wide-lock", "runtime"])
 @pytest.mark.parametrize("joints", [JOINTS, rotated_joints()], ids=["synthetic", "rotated-scaled"])
 def test_field_parity(joints, variant):
     frame = build_body_frame(**joints)
@@ -101,6 +109,14 @@ def test_field_check_parity(joints):
     for t, v in js["volume"].items():
         assert abs(py["volume"][t]["meanChange"] - v["meanChange"]) < 1e-9
         assert abs(py["volume"][t]["maxAbsChange"] - v["maxAbsChange"]) < 1e-9
+
+
+def test_field_check_with_runtime_targets_matches_js(frame):
+    params = _variant('runtime')
+    js = eval_js({'frame': frame, 'params': params, 'check': {'res': 6}})['check']
+    py = field_check(BustField(frame, params), 6)
+    assert abs(py['minDet'] - js['minDet']) < 1e-9
+    assert abs(py['volume']['bust_linear']['maxAbsChange'] - js['volume']['bust_linear']['maxAbsChange']) < 1e-9
 
 
 def test_single_point_api(frame):

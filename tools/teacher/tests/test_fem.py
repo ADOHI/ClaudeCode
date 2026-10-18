@@ -126,6 +126,26 @@ def test_inverse_rest_reproduces_target():
     assert (Xr - vol.X)[top & ~vol.fixed, 1].mean() > 0
 
 
+def test_inverse_budget_exhaustion_returns_the_solved_rest_state():
+    vol = mound(nz=2, h=0.1)
+    m = make_model(vol)
+    loads = dict(gamma=4.0, gdir=[0.0, -1.0, 0.0])
+    Xr, x, info = inverse_rest(m, vol.X, loads, tol=1e-14, maxit=1)
+    assert not info['converged'] and info['error_max_S'] > 1e-14
+    assert np.array_equal(Xr, m.X_rest)
+    assert np.array_equal(Xr, vol.X)
+    # The returned equilibrium belongs to the returned rest shape, even if
+    # inversion did not reach its target before the iteration budget ran out.
+    m.set_rest(Xr)
+    m.set_loads(**loads)
+    assert np.linalg.norm(m.gradient(x).ravel()[m.free_dof]) < 1e-7
+
+
+def test_inverse_requires_an_iteration():
+    with pytest.raises(ValueError, match='maxit'):
+        inverse_rest(None, None, {}, maxit=0)
+
+
 def test_modes_are_valid_generalized_eigenpairs():
     vol = mound()
     m = make_model(vol, lig=False)

@@ -175,11 +175,12 @@ export const BANDS = {
  * @returns {{distance: number|null, inside: boolean, per: object, missing: string[]}}
  */
 export function scoreBands(m, band, { reference = null } = {}) {
+  if (m?.ok === false) return { distance: null, inside: false, per: {}, missing: Object.keys(band.metrics) };
   let acc = 0, sw = 0, inside = true;
   const per = {}, missing = [];
   for (const [k, b] of Object.entries(band.metrics)) {
     let v = m?.[k];
-    if (k === 'imfRise') v = reference && isNum(m?.imfY) && isNum(reference.imfY) ? m.imfY - reference.imfY : null;
+    if (k === 'imfRise') v = reference && reference.ok !== false && isNum(m?.imfY) && isNum(reference.imfY) ? m.imfY - reference.imfY : null;
     if (!isNum(v)) {
       missing.push(k);
       continue;

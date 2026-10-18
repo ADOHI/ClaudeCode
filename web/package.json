@@ -10,7 +10,9 @@
     "preview": "vite preview",
     "test": "node --test test/*.test.js",
     "fetch-model": "node scripts/fetch-model.mjs",
-    "shoot": "node scripts/shoot.mjs"
+    "shoot": "node scripts/shoot.mjs",
+    "golden": "node scripts/gen-golden.mjs",
+    "test:viewer": "node scripts/check-viewer.mjs"
   },
   "dependencies": {
     "@moeru/three-mmd": "0.1.2",
